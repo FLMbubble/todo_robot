@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TODO Robot Debug</title>
+<style>
+:root {
+  --bg: #1a1a2e; --bg2: #16213e; --card: #0f3460; --accent: #e94560;
+  --accent2: #533483; --text: #eee; --text-dim: #999; --green: #00b894;
+  --yellow: #fdcb6e; --red: #e17055; --radius: 16px;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, "PingFang SC", sans-serif; background: var(--bg); color: var(--text); padding: 20px; }
+#debug { background: rgba(255,0,0,.1); padding: 10px; border-radius: 8px; margin-bottom: 10px; font-size: 12px; display: none; }
+.section-label { font-size: 11px; color: var(--text-dim); padding: 8px 4px 4px; font-weight: 600; }
+.todo-item { background: rgba(255,255,255,.04); border-radius: 10px; padding: 10px 12px; margin-bottom: 8px; display: flex; align-items: flex-start; gap: 10px; }
+.todo-checkbox { width: 20px; height: 20px; border-radius: 6px; border: 2px solid var(--text-dim); flex-shrink: 0; }
+.todo-checkbox.checked { background: var(--green); border-color: var(--green); }
+.todo-title { font-size: 13px; }
+.todo-meta { font-size: 11px; color: var(--text-dim); margin-top: 3px; display: flex; gap: 8px; }
+.priority-dot { width: 8px; height: 8px; border-radius: 50%; }
+.p-high { background: var(--red); } .p-medium { background: var(--yellow); } .p-low { background: var(--green); } .p-none { background: var(--text-dim); }
+</style>
+</head>
+<body>
+<div id="debug"></div>
+<div id="list"></div>
+<script>
+const SUMMARY_DATA = {"todos": [{"id": 4736277, "title": "数据预审:1000 ego lane", "summary": "", "priority": "medium", "status": 2, "due_time": -1, "due_time_str": "", "completed": false}, {"id": 4736279, "title": "dcc skill接入 codex", "summary": "", "priority": "low", "status": 2, "due_time": -1, "due_time_str": "", "completed": false}, {"id": 4736273, "title": "autopipeline:分析是否为模型选取问题", "summary": "", "priority": "high", "status": 2, "due_time": -1, "due_time_str": "", "completed": false}], "doc_todos": [{"doc_id": 2209802394514, "title": "autopipeline:分析是否为模型选取问题", "priority": "", "status": "未完成", "progress": "", "completed": false, "row_index": 1, "cell_anchors": ["3b18c165-dfe1-4389-a0da-2446fc07d3d2", "d19acd8f-a5a8-4f68-be1f-e01185f88dbb", "bafcbc80-eaad-41ea-9398-8c7de6a479d5", "3e6949fb-b27f-489b-81f8-33a264d833ac"], "table_anchor": "e2b676ed-99e1-47a6-a294-4b80f14d7351", "source": "doc_table"}, {"doc_id": 2209802394514, "title": "autopipeline：分析是否没有真正使用gen3数据训练", "priority": "", "status": "未完成", "progress": "", "completed": false, "row_index": 2, "cell_anchors": ["4cdd1e11-0f15-4bf3-bc20-8b9e2de1d331", "807c0668-90fb-4118-8669-a420b2195ca6", "e6280b46-5acc-45c4-9d01-71c94d248702", "d32fd8fe-dcde-4d98-bdf2-753b2ef30856"], "table_anchor": "e2b676ed-99e1-47a6-a294-4b80f14d7351", "source": "doc_table"}, {"doc_id": 2209802394514, "title": "autopipeline：接入自动化账号", "priority": "", "status": "未完成", "progress": "", "completed": false, "row_index": 3, "cell_anchors": ["b47b0adb-90a1-495c-82f3-ae1c692c2ff8", "f4193884-aaa0-4df0-9fc4-7a03cb348a1e", "f44b5f44-9fdb-48eb-8eea-1579a93f10a2", "aa6ef773-95a6-4390-a4b8-150742209fca"], "table_anchor": "e2b676ed-99e1-47a6-a294-4b80f14d7351", "source": "doc_table"}, {"doc_id": 2209802394514, "title": "vlm：从rt_event表中拉取数据，并打伪标签", "priority": "", "status": "未完成", "progress": "", "completed": false, "row_index": 4, "cell_anchors": ["5d23c41a-7524-4d26-9d94-2865181a112d", "c3416e87-8a44-46e7-bd5f-755c784c72e6", "96b7a9f9-2cd8-42be-828b-d346d33ad007", "98be7150-9fbc-45d0-87b4-ae19d4ea15aa"], "table_anchor": "e2b676ed-99e1-47a6-a294-4b80f14d7351", "source": "doc_table"}, {"doc_id": 2209802394514, "title": "数据预审：1000 ego lane", "priority": "", "status": "未完成", "progress": "", "completed": false, "row_index": 5, "cell_anchors": ["fa003ec9-722a-43b7-8220-1e4d9cbd8773", "3fa08583-271f-4155-878f-9b91154b2516", "2fc48ef7-6a25-4d7d-9c60-27f93cbdc6c9", "c4e517ec-e401-4d5b-b3fb-c7fb0723edca"], "table_anchor": "e2b676ed-99e1-47a6-a294-4b80f14d7351", "source": "doc_table"}, {"doc_id": 2209802394514, "title": "数据发标：500 weekly fn挖掘", "priority": "", "status": "进行中", "progress": "", "completed": false, "row_index": 6, "cell_anchors": ["f826de38-9484-4777-9062-8da36cd7b6b5", "fe2653f6-b563-471e-b1cb-c0f1864edb8d", "fe5d74d7-46c2-4033-8c11-4200728a737d", "debd5a11-f89d-4058-ba1b-67af5e3b0850"], "table_anchor": "e2b676ed-99e1-47a6-a294-4b80f14d7351", "source": "doc_table"}, {"doc_id": 2209802394514, "title": "数据发标：寻找fp多的问题，触发对应的trigger", "priority": "", "status": "未完成", "progress": "", "completed": false, "row_index": 7, "cell_anchors": ["608dc054-25d3-4df5-acdf-3d07e03d1162", "4af305b9-a6b8-4b3b-9aeb-5cce66a7f7bc", "5d267e60-ae49-4402-97c9-6a85b4b9abb9", "b0cda9b7-882b-4d54-a72a-288400dcce94"], "table_anchor": "e2b676ed-99e1-47a6-a294-4b80f14d7351", "source": "doc_table"}, {"doc_id": 2209802394514, "title": "parked car:issue问题汇总分析工具", "priority": "", "status": "未完成", "progress": "", "completed": false, "row_index": 8, "cell_anchors": ["cd8691a3-ff9a-4ae4-a24c-fc992d58ac5b", "8afb26f5-951a-4f2a-9981-fd78b8f15b97", "9424d4bf-4309-4b73-8d30-d074a80921ef", "c1c824e6-832b-49d6-8485-16f208c44b3b"], "table_anchor": "e2b676ed-99e1-47a6-a294-4b80f14d7351", "source": "doc_table"}, {"doc_id": 2209802394514, "title": "dcc skill接入 codex", "priority": "", "status": "未完成", "progress": "", "completed": false, "row_index": 9, "cell_anchors": ["589feca5-1ffc-4ca3-8315-4d904b726764", "ccf67af3-233e-49a7-8cff-337a68a6c919", "32555f7a-a79c-42f9-bda8-acd8fab01157", "a102a95f-19e9-49c1-ada8-00cfe37b30c4"], "table_anchor": "e2b676ed-99e1-47a6-a294-4b80f14d7351", "source": "doc_table"}, {"doc_id": 2209802394514, "title": "to do list桌面悬浮球（支持与个人空间cooper交互，写日报）", "priority": "", "status": "未完成", "progress": "", "completed": false, "row_index": 10, "cell_anchors": ["ab43b3b5-21dd-498d-a7a8-72607943fc81", "bb32c70d-f01d-4989-9110-db91de5faee6", "33538f2a-9ddc-4f85-8f97-8dae2ef91297", "04472531-d0b0-4708-95f0-1c8d62cf32ab"], "table_anchor": "e2b676ed-99e1-47a6-a294-4b80f14d7351", "source": "doc_table"}], "doc_drafts": [], "daily_doc_id": 2209802394514, "calendar": [], "daily_docs": [{"id": 2209802394514, "name": "09.20", "type": "NEWDOC", "path": "2026.09"}], "weekly_docs": [], "okr_docs": [], "today": "2026-09-21 Monday", "week": 39};
+
+function esc(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+function showDebug(msg) {
+  const d = document.getElementById('debug');
+  d.style.display = 'block';
+  d.innerHTML += msg + '<br>';
+}
+
+try {
+  const docTodos = SUMMARY_DATA.doc_todos || [];
+  const todos = SUMMARY_DATA.todos || [];
+  showDebug('doc_todos: ' + docTodos.length + ', todos: ' + todos.length);
+
+  let html = '';
+  
+  if (docTodos.length > 0) {
+    html += '<div class="section-label">Cooper 日报 TO DO</div>';
+    docTodos.forEach(t => {
+      const priDot = {high:'p-high','高':'p-high',medium:'p-medium','中':'p-medium',low:'p-low','低':'p-low'}[t.priority] || 'p-none';
+      html += '<div class="todo-item">';
+      html += '<div class="todo-checkbox ' + (t.completed?'checked':'') + '"></div>';
+      html += '<div><div class="todo-title">' + esc(t.title) + '</div>';
+      html += '<div class="todo-meta"><span class="priority-dot ' + priDot + '"></span>';
+      html += '<span>' + esc(t.status) + '</span>';
+      if (t.progress && t.progress.trim()) html += '<span>' + esc(t.progress) + '</span>';
+      html += '</div></div></div>';
+    });
+  }
+  
+  if (todos.length > 0) {
+    html += '<div class="section-label">D-Chat 待办</div>';
+    todos.forEach(t => {
+      html += '<div class="todo-item">';
+      html += '<div class="todo-checkbox ' + (t.completed?'checked':'') + '"></div>';
+      html += '<div><div class="todo-title">' + esc(t.title) + '</div>';
+      html += '<div class="todo-meta"><span class="priority-dot p-' + (t.priority||'none') + '"></span>';
+      html += '</div></div></div>';
+    });
+  }
+  
+  if (!html) html = '<div>暂无待办</div>';
+  document.getElementById('list').innerHTML = html;
+  showDebug('Rendering complete');
+} catch(err) {
+  showDebug('ERROR: ' + err.message + '<br>' + err.stack);
+}
+</script>
+</body>
+</html>

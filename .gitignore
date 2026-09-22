@@ -1,0 +1,15 @@
+# Binary
+.dws/dws
+
+# OS files
+.DS_Store
+
+# Logs
+*.log
+/tmp/
+
+# Python
+__pycache__/
+*.pyc
+
+data/
