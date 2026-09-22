@@ -16,12 +16,12 @@ mkdir -p data
 
 # 杀掉旧实例
 echo "🔄 重启服务 (端口 8500)..."
-PIDS=$(lsof -ti :8500 2>/dev/null)
+PIDS=$(lsof -ti :8501 2>/dev/null)
 if [ -n "$PIDS" ]; then
     echo "  发现旧进程: $PIDS"
     kill $PIDS 2>/dev/null
     sleep 1
-    PIDS=$(lsof -ti :8500 2>/dev/null)
+    PIDS=$(lsof -ti :8501 2>/dev/null)
     if [ -n "$PIDS" ]; then
         echo "  强制终止: $PIDS"
         kill -9 $PIDS 2>/dev/null
@@ -33,8 +33,8 @@ fi
 nohup python3 app.py > /tmp/todo_robot.log 2>&1 &
 echo "PID: "
 sleep 2
-if lsof -ti :8500 > /dev/null 2>&1; then
-    echo "✅ 服务已启动: http://localhost:8500"
+if lsof -ti :8501 > /dev/null 2>&1; then
+    echo "✅ 服务已启动: http://localhost:8501"
 else
     echo "❌ 启动失败，查看日志: /tmp/todo_robot.log"
     cat /tmp/todo_robot.log

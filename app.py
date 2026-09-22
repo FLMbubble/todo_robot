@@ -22,7 +22,7 @@ from concurrent.futures import ThreadPoolExecutor
 DWS_BIN = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".dws", "dws")
 TIMEZONE = "Asia/Shanghai"
 SHANGHAI_TZ = timezone(timedelta(hours=8))
-PORT = 8500
+PORT = 8511
 
 # ---- 日报/周报文档映射配置 (可按需修改) ----
 # 通过日期自动生成日报文档标题，周报同理
@@ -30,6 +30,15 @@ PORT = 8500
 # OKR文档标题格式包含 "OKR" 或 "季度OKR"
 
 DAILY_DOC_PATTERN = r"^\d{2}\.\d{2}$"          # 如 09.20
+
+# 日报文档存放的 Cooper 个人空间文件夹配置
+# 结构: 个人空间(space-id=0) → Daily 文件夹 → YYYY.MM 月份文件夹
+DAILY_SPACE_ID = 0                                    # 个人空间
+DAILY_ROOT_FOLDER_ID = 2209182943521                   # "Daily" 文件夹
+# 月份子文件夹会在同步时自动查找或创建 (如 "2026.09")
+
+# 记录最近同步创建的日报文档 ID (date_str -> resource_id)
+_RECENT_SYNCED_DOCS = {}
 WEEKLY_DOC_PATTERN = r"周报|weekly|week"       # 如 38周报 / 周报 / weekly
 OKR_DOC_PATTERN = r"OKR|okr|季度|目标"          # 季度OKR
 
@@ -262,17 +271,33 @@ def sync_local_to_cooper(date_str=None):
                 break
 
     if not target_doc:
-        # 创建新日报
-        full_content = f"# {today_title}\n\n# TO DO\n\n"
-        for t in todos:
-            mark = "✅" if t.get("completed") else "⬜"
-            full_content += f"- {mark} {t.get('title', '')}\n"
-        res = create_doc(today_title, full_content, kind="cooper")
+        # 创建新日报（含 TO DO 标题）
+        full_content = f"# {today_title}\n\n# TO DO\n"
+        month_folder = find_or_create_month_folder()
+        res = create_doc(today_title, full_content, kind="cooper",
+                         space_id=DAILY_SPACE_ID,
+                         parent_id=month_folder or DAILY_ROOT_FOLDER_ID)
         resource_id = None
         if res.get("ok"):
             resource_id = res.get("data", {}).get("resourceId") or res.get("data", {}).get("id")
         cache_invalidate("recent_docs")
-        return {"action": "created", "resource_id": resource_id, "title": today_title, "synced": len(todos)}
+
+        if not resource_id:
+            return {"action": "error", "error": "创建文档失败", "synced": 0}
+
+        # 确保表格存在，然后逐条写入待办（与更新逻辑一致）
+        ensure_todo_table(resource_id, app="cooper")
+        synced = 0
+        for t in todos:
+            priority_map = {"high": "高", "medium": "中", "low": "低", "none": ""}
+            pri = priority_map.get(t.get("priority", "none"), "")
+            status = "已完成" if t.get("completed") else "未完成"
+            progress = t.get("progress", "")
+            add_res = add_doc_todo(resource_id, t.get("title", ""), priority=pri, status=status, progress=progress, app="cooper")
+            if add_res.get("ok"):
+                synced += 1
+        _RECENT_SYNCED_DOCS[today_title] = resource_id
+        return {"action": "created", "resource_id": resource_id, "title": today_title, "synced": synced, "total": len(todos)}
 
     resource_id = target_doc.get("resourceId")
     if not resource_id:
@@ -403,14 +428,103 @@ def get_doc_content(resource_id, app="cooper"):
     return ""
 
 
+def find_or_create_month_folder():
+    """查找当月文件夹 (如 "2026.09")，不存在则创建。
+    返回 folder_id 或 None。
+    """
+    month_title = datetime.now(SHANGHAI_TZ).strftime("%Y.%m")
+
+    # 列出 Daily 根文件夹下的子文件夹
+    res = run_dws([
+        "space", "list",
+        "--space-id", str(DAILY_SPACE_ID),
+        "--parent-id", str(DAILY_ROOT_FOLDER_ID),
+        "--output", "json"
+    ], timeout=15)
+    if not res.get("ok"):
+        return None
+    d = res.get("data", {})
+    if isinstance(d, dict):
+        items = d.get("data", {}).get("items", []) if isinstance(d.get("data"), dict) else d.get("items", [])
+    else:
+        items = []
+
+    for item in items:
+        name = item.get("display_name", "")
+        if name == month_title and item.get("space_resource_type") == "DIR":
+            return item.get("id")
+
+    # 文件夹不存在，创建
+    res = run_dws([
+        "space", "folder-create",
+        "--space-id", str(DAILY_SPACE_ID),
+        "--parent-id", str(DAILY_ROOT_FOLDER_ID),
+        month_title,
+        "--output", "json"
+    ], timeout=15)
+    if res.get("ok"):
+        d = res.get("data", {})
+        if isinstance(d, dict):
+            return d.get("id") or d.get("data", {}).get("id")
+    return None
+
+
+def list_folder_docs(folder_id):
+    """列出某个文件夹下的所有文档"""
+    if not folder_id:
+        return []
+    res = run_dws([
+        "space", "list",
+        "--space-id", str(DAILY_SPACE_ID),
+        "--parent-id", str(folder_id),
+        "--output", "json"
+    ], timeout=15)
+    if not res.get("ok"):
+        return []
+    d = res.get("data", {})
+    if isinstance(d, dict):
+        items = d.get("data", {}).get("items", []) if isinstance(d.get("data"), dict) else d.get("items", [])
+    else:
+        items = []
+    # 转换为与 get_recent_docs 兼容的格式
+    docs = []
+    for item in items:
+        if item.get("space_resource_type") in ("NEWDOC", "SHIMO2_DOC", "DK_PAGE"):
+            docs.append({
+                "resourceId": item.get("id"),
+                "resourceName": item.get("display_name", ""),
+                "resourceTypeStr": item.get("space_resource_type", ""),
+                "filePath": "",
+            })
+    return docs
+
+
 def find_daily_report_docs():
-    """查找日报文档"""
-    docs = get_recent_docs()
+    """查找日报文档 — 优先从当月文件夹查找，回退到最近文档列表"""
     daily = []
+    seen_ids = set()
+
+    # 1. 优先从当月文件夹查找
+    month_folder = find_or_create_month_folder()
+    if month_folder:
+        folder_docs = list_folder_docs(month_folder)
+        for doc in folder_docs:
+            name = doc.get("resourceName", "")
+            if re.match(DAILY_DOC_PATTERN, name.strip()):
+                daily.append(doc)
+                seen_ids.add(doc.get("resourceId"))
+
+    # 2. 回退到最近文档列表（可能有未归档的日报）
+    # 只接受 NEWDOC 类型（Cooper 文档），排除 DK_PAGE（知识库页面）等
+    docs = get_recent_docs()
     for doc in docs:
         name = doc.get("resourceName", "")
-        if re.match(DAILY_DOC_PATTERN, name.strip()):
+        rid = doc.get("resourceId")
+        rtype = doc.get("resourceTypeStr", "")
+        if re.match(DAILY_DOC_PATTERN, name.strip()) and rid not in seen_ids and rtype == "NEWDOC":
             daily.append(doc)
+            seen_ids.add(rid)
+
     return daily
 
 
@@ -467,15 +581,217 @@ def get_calendar_events(days=1):
     return result
 
 
-def create_doc(title, content, kind="cooper"):
-    """创建 Cooper 文档"""
-    return run_dws([
+def get_dm_messages(max_chats=15, msg_per_chat=10):
+    """获取近期 D-Chat 消息，分为两类:
+    1. dm_others: 私聊中对方发来的消息 (只关注对方发来的)
+    2. group_atme: 群聊中 @我的消息
+    返回: {"dm_others": [...], "group_atme": [...]}
+    """
+    dm_key = "dm_messages_v2"
+    cached = cache_get(dm_key, ttl=60)
+    if cached is not None:
+        return cached
+
+    # 获取自己的 UID
+    my_uid = None
+    my_res = run_dws(["user", "info", "--self", "--output", "json"], timeout=10)
+    if my_res.get("ok"):
+        my_uid = str(my_res.get("data", {}).get("user", {}).get("id", ""))
+
+    # 1. Dump chat list
+    chat_file = os.path.join(DATA_DIR, "..", "_dchats_tmp.json")
+    chat_file = os.path.normpath(chat_file)
+    try:
+        subprocess.run(
+            [DWS_BIN, "chat", "+dump-chats", chat_file, "--output", "json"],
+            capture_output=True, text=True, timeout=30,
+        )
+    except Exception:
+        return {"dm_others": [], "group_atme": []}
+
+    try:
+        with open(chat_file, "r", encoding="utf-8") as f:
+            chat_data = json.load(f)
+    except Exception:
+        return {"dm_others": [], "group_atme": []}
+
+    chats = chat_data.get("data", {}).get("chats", [])
+    current_ms = now_ms()
+
+    # Separate private chats and group chats
+    p2p_chats = [c for c in chats if c.get("type") in ("p2p", "p2ai")]
+    p2p_chats.sort(key=lambda c: c.get("latest_ts", 0), reverse=True)
+    p2p_chats = p2p_chats[:max_chats]
+
+    group_chats = [c for c in chats if c.get("type") == "channel"]
+    # For group chats, prioritize those with unread or mention_me
+    group_chats.sort(key=lambda c: (
+        c.get("mention_me_count", 0) > 0,
+        c.get("unread_count", 0) > 0,
+        c.get("latest_ts", 0),
+    ), reverse=True)
+    group_chats = group_chats[:max_chats]
+
+    temp_files = [chat_file]
+    dm_others = []
+    group_atme = []
+
+    # 2. Process private chats - only messages from others
+    for chat in p2p_chats:
+        vid = chat.get("vchannel_id")
+        name = chat.get("name", "")
+        if not vid:
+            continue
+        latest_ts = chat.get("latest_ts", 0)
+        if latest_ts and (current_ms - latest_ts) > 86400000 * 2:
+            continue
+
+        msg_file = os.path.join(DATA_DIR, "..", f"_dm_{vid}.json")
+        msg_file = os.path.normpath(msg_file)
+        temp_files.append(msg_file)
+        try:
+            subprocess.run(
+                [DWS_BIN, "message", "+dump-by-chat", "--by-chat-id", str(vid), "--today", msg_file, "--output", "json"],
+                capture_output=True, text=True, timeout=20,
+            )
+        except Exception:
+            continue
+        try:
+            with open(msg_file, "r", encoding="utf-8") as f:
+                mdata = json.load(f)
+        except Exception:
+            continue
+
+        messages = mdata.get("data", {}).get("messages", [])
+        for m in messages[:msg_per_chat]:
+            subtype = m.get("subtype", "")
+            if subtype not in ("normal", "combined"):
+                continue
+            text = m.get("text", "").strip()
+            if not text or len(text) < 2:
+                continue
+            if text in ("[图片]", "[文件]", "[语音]", "[视频]"):
+                continue
+            if subtype == "combined" and ("的聊天记录" in text or "的合并转发" in text):
+                continue
+            if text.startswith("http://") or text.startswith("https://"):
+                if " " not in text:
+                    continue
+
+            # Only keep messages from others (not my own)
+            msg_uid = str(m.get("uid", ""))
+            frm_uid = str(m.get("from", {}).get("uid", ""))
+            if my_uid and (msg_uid == my_uid or frm_uid == my_uid):
+                continue
+
+            author_info = m.get("content", {}).get("author", {})
+            dm_others.append({
+                "chat_name": name,
+                "author": author_info.get("fullname", ""),
+                "text": text[:500],
+                "created_at": m.get("created_at", ""),
+                "vchannel_id": vid,
+                "subtype": subtype,
+            })
+
+    # 3. Process group chats - only @me messages
+    my_mention_tag = f"@<={my_uid}=>" if my_uid else None
+    for chat in group_chats:
+        vid = chat.get("vchannel_id")
+        name = chat.get("name", "")
+        if not vid:
+            continue
+        latest_ts = chat.get("latest_ts", 0)
+        if latest_ts and (current_ms - latest_ts) > 86400000 * 2:
+            continue
+
+        msg_file = os.path.join(DATA_DIR, "..", f"_grp_{vid}.json")
+        msg_file = os.path.normpath(msg_file)
+        temp_files.append(msg_file)
+        try:
+            subprocess.run(
+                [DWS_BIN, "message", "+dump-by-chat", "--by-chat-id", str(vid), "--today", msg_file, "--output", "json"],
+                capture_output=True, text=True, timeout=20,
+            )
+        except Exception:
+            continue
+        try:
+            with open(msg_file, "r", encoding="utf-8") as f:
+                mdata = json.load(f)
+        except Exception:
+            continue
+
+        messages = mdata.get("data", {}).get("messages", [])
+        for m in messages[:msg_per_chat * 2]:
+            subtype = m.get("subtype", "")
+            if subtype not in ("normal", "combined"):
+                continue
+            text = m.get("text", "").strip()
+            if not text or len(text) < 2:
+                continue
+            if text in ("[图片]", "[文件]", "[语音]", "[视频]"):
+                continue
+
+            # Check if this message @mentions me
+            is_at_me = False
+            if my_mention_tag and my_mention_tag in text:
+                is_at_me = True
+            # Also check metadata for mention info
+            metadata = m.get("content", {}).get("metadata", {})
+            if isinstance(metadata, dict):
+                mentions = metadata.get("mentions", [])
+                if isinstance(mentions, list):
+                    for mention in mentions:
+                        if isinstance(mention, dict) and str(mention.get("uid", "")) == my_uid:
+                            is_at_me = True
+                            break
+                        if isinstance(mention, str) and my_uid in mention:
+                            is_at_me = True
+                            break
+                # Also check if mention_me flag is set
+                if metadata.get("mention_me") or metadata.get("at_me"):
+                    is_at_me = True
+
+            if not is_at_me:
+                continue
+
+            author_info = m.get("content", {}).get("author", {})
+            group_atme.append({
+                "chat_name": name,
+                "author": author_info.get("fullname", ""),
+                "text": text[:500],
+                "created_at": m.get("created_at", ""),
+                "vchannel_id": vid,
+                "subtype": subtype,
+            })
+
+    # Clean up temp files
+    for fn in temp_files:
+        try:
+            os.remove(os.path.normpath(fn))
+        except Exception:
+            pass
+
+    result = {"dm_others": dm_others, "group_atme": group_atme}
+    cache_set(dm_key, result, ttl=60)
+    return result
+
+
+
+def create_doc(title, content, kind="cooper", space_id=None, parent_id=None):
+    """创建 Cooper 文档，可指定空间和父文件夹"""
+    args = [
         "doc", "create",
         "--kind", kind,
         "--title", title,
         "--content", content,
         "--output", "json"
-    ])
+    ]
+    if space_id is not None:
+        args += ["--space-id", str(space_id)]
+    if parent_id is not None:
+        args += ["--parent-id", str(parent_id)]
+    return run_dws(args)
 
 
 def update_doc_content(resource_id, content, app="cooper"):
@@ -593,7 +909,10 @@ def sync_todo_to_daily_report(todo_items):
         full_content = f"# {today_title}\n\n# TO DO\n\n"
         for line in todo_lines:
             full_content += f"- {line}\n"
-        res = create_doc(today_title, full_content, kind="cooper")
+        month_folder = find_or_create_month_folder()
+        res = create_doc(today_title, full_content, kind="cooper",
+                         space_id=DAILY_SPACE_ID,
+                         parent_id=month_folder or DAILY_ROOT_FOLDER_ID)
         resource_id = None
         if res.get("ok"):
             resource_id = res.get("data", {}).get("resourceId") or res.get("data", {}).get("id")
@@ -1766,24 +2085,33 @@ class TodoRobotHandler(http.server.BaseHTTPRequestHandler):
             fut_todos = pool.submit(get_todos)
             fut_cal = pool.submit(get_calendar_events, 1)
             fut_docs = pool.submit(get_recent_docs)
+            fut_dm = pool.submit(get_dm_messages)
 
             todos = fut_todos.result()
             calendar = fut_cal.result()
             all_docs = fut_docs.result()
+            dm_messages = fut_dm.result()
 
         # 从同一份文档列表中分类
         daily_docs = []
         weekly_docs = []
         okr_docs = []
+        existing_doc_ids = set()
         for doc in all_docs:
             name = doc.get("resourceName", "").strip()
             path = doc.get("filePath", "")
-            if re.match(DAILY_DOC_PATTERN, name):
+            existing_doc_ids.add(doc.get("resourceId"))
+            if re.match(DAILY_DOC_PATTERN, name) and doc.get("resourceTypeStr") == "NEWDOC":
                 daily_docs.append(doc)
             elif re.search(WEEKLY_DOC_PATTERN, name) or re.search(WEEKLY_DOC_PATTERN, path):
                 weekly_docs.append(doc)
             elif re.search(OKR_DOC_PATTERN, name) or re.search(OKR_DOC_PATTERN, path):
                 okr_docs.append(doc)
+
+        # 合并最近同步创建的日报文档（如果尚未在最近列表中）
+        for title, rid in _RECENT_SYNCED_DOCS.items():
+            if rid not in existing_doc_ids:
+                daily_docs.append({"resourceId": rid, "resourceName": title, "resourceTypeStr": "NEWDOC", "filePath": ""})
 
         todo_fmt = []
         for t in todos:
@@ -1816,11 +2144,19 @@ class TodoRobotHandler(http.server.BaseHTTPRequestHandler):
         doc_todos = []
         doc_drafts = []
         daily_doc_id = None
+        # 优先匹配今日日期的日报文档 (如 "09.22")
+        today_title = datetime.now(SHANGHAI_TZ).strftime("%m.%d")
         for doc in daily_docs:
-            rid = doc.get("resourceId")
-            if rid:
-                daily_doc_id = rid
+            if doc.get("resourceName", "").strip() == today_title:
+                daily_doc_id = doc.get("resourceId")
                 break
+        # 如果没找到今日日报，取第一个日报文档
+        if not daily_doc_id:
+            for doc in daily_docs:
+                rid = doc.get("resourceId")
+                if rid:
+                    daily_doc_id = rid
+                    break
 
         if daily_doc_id:
             with ThreadPoolExecutor(max_workers=2) as pool:
@@ -1858,6 +2194,7 @@ class TodoRobotHandler(http.server.BaseHTTPRequestHandler):
                 "okr_docs": fmt_docs(okr_docs),
                 "weekly_todos": weekly_todos,
                 "okr_todos": okr_todos,
+                "dm_messages": dm_messages,
                 "today": datetime.now(SHANGHAI_TZ).strftime("%Y-%m-%d %A"),
                 "week": datetime.now(SHANGHAI_TZ).isocalendar()[1],
             }

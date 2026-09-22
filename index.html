@@ -100,6 +100,7 @@ body{font-family:-apple-system,"PingFang SC","Helvetica Neue",sans-serif;backgro
     <div class="tab" onclick="switchTab('calendar')" id="tab-calendar">&#128197; 日程</div>
     <div class="tab" onclick="switchTab('docs')" id="tab-docs">&#128196; 文档</div>
     <div class="tab" onclick="switchTab('okr')" id="tab-okr">&#127919; OKR</div>
+    <div class="tab" onclick="switchTab('dm')" id="tab-dm">&#128172; 消息</div>
   </div>
   <div class="tab-content" id="content-todos">
     <div class="add-bar">
@@ -117,6 +118,7 @@ body{font-family:-apple-system,"PingFang SC","Helvetica Neue",sans-serif;backgro
   <div class="tab-content" id="content-calendar" style="display:none"><div id="calList"></div></div>
   <div class="tab-content" id="content-docs" style="display:none"><div id="docList"></div></div>
   <div class="tab-content" id="content-okr" style="display:none"><div id="okrList"></div></div>
+  <div class="tab-content" id="content-dm" style="display:none"><div id="dmList"></div></div>
   <div class="sync-bar">
     <button class="sync-btn" onclick="syncDaily()" id="syncDailyBtn">&#128229; 同步到日报</button>
     <button class="sync-btn" onclick="syncWeekly()" id="syncWeeklyBtn">&#128229; 同步到周报</button>
@@ -135,7 +137,7 @@ function esc(s){
 var state = {
   todos: [], localTodos: [], calendar: [],
   dailyDocs: [], weeklyDocs: [], okrDocs: [],
-  docTodos: [], docDrafts: [], docId: null, okrTodos: [], weeklyTodos: []
+  docTodos: [], docDrafts: [], docId: null, okrTodos: [], weeklyTodos: [], dmOthers: [], groupAtMe: []
 };
 
 async function api(url, method, body){
@@ -177,6 +179,7 @@ async function refresh(){
   document.getElementById("calList").innerHTML = '<div class="loading">加载中...</div>';
   document.getElementById("docList").innerHTML = '<div class="loading">加载中...</div>';
   document.getElementById("okrList").innerHTML = '<div class="loading">加载中...</div>';
+  document.getElementById("dmList").innerHTML = '<div class="loading">加载中...</div>';
   try{
     document.getElementById("apiStatus").textContent = "正在加载...";
     var res = await api("/api/summary");
@@ -199,6 +202,9 @@ async function refresh(){
     // Load weekly and OKR local data from summary response
     state.weeklyTodos = d.weekly_todos || [];
     state.okrTodos = d.okr_todos || [];
+    var dmData = d.dm_messages || {};
+    state.dmOthers = dmData.dm_others || [];
+    state.groupAtMe = dmData.group_atme || [];
 
     document.getElementById("dateStr").textContent = d.today + " · 第" + d.week + "周";
     var active = (state.localTodos||[]).filter(function(t){return !t.completed;}).length
@@ -212,6 +218,7 @@ async function refresh(){
     renderCalendar();
     renderDocs();
     renderOKR();
+    renderDM();
   }catch(err){
     console.error("refresh error:", err);
     document.getElementById("todoList").innerHTML = '<div class="empty">加载错误: ' + esc(err.message) + "</div>";
@@ -340,6 +347,96 @@ function renderOKR(){
     return;
   }
   list.innerHTML = '<div class="empty">暂无OKR数据</div>';
+}
+
+function renderDM(){
+  var list = document.getElementById("dmList");
+  var html = "";
+  var hasContent = false;
+
+  // Group messages by author (chat_name for DM, chat_name for group)
+  function groupByAuthor(msgs){
+    var groups = {};
+    var order = [];
+    msgs.forEach(function(m, idx){
+      var key = m.author || m.chat_name || "未知";
+      if(!groups[key]){
+        groups[key] = {author: m.author, chat_name: m.chat_name, msgs: []};
+        order.push(key);
+      }
+      groups[key].msgs.push({m: m, idx: idx});
+    });
+    return order.map(function(k){ return groups[k]; });
+  }
+
+  // === 私聊：对方发来的消息 ===
+  if(state.dmOthers && state.dmOthers.length > 0){
+    hasContent = true;
+    html += '<div class="section-label">私聊消息 <span style="float:right;font-weight:400;text-transform:none">对方发来 · 点击 + 转为待办</span></div>';
+    var dmGroups = groupByAuthor(state.dmOthers);
+    dmGroups.forEach(function(g){
+      var msgs = g.msgs;
+      var latestTime = "";
+      msgs.forEach(function(mi){
+        var t = mi.m.created_at ? mi.m.created_at.substring(11, 16) : "";
+        if(t > latestTime) latestTime = t;
+      });
+      html += '<div class="cal-item">'
+        + '<div class="cal-time">' + esc(latestTime) + ' · ' + esc(g.author) + ' <span style="color:var(--text-dim);font-size:11px">(' + msgs.length + '条)</span></div>';
+      msgs.forEach(function(mi){
+        var timeStr = mi.m.created_at ? mi.m.created_at.substring(11, 16) : "";
+        html += '<div class="cal-title" style="margin-top:6px;padding-left:8px;border-left:2px solid rgba(255,255,255,.1)">' + esc(mi.m.text) + '</div>'
+          + '<div style="display:flex;align-items:center;gap:8px;margin-top:2px;padding-left:8px">'
+          + '<span style="font-size:10px;color:var(--text-dim)">' + esc(timeStr) + '</span>'
+          + '<button class="process-btn" style="margin:0;width:auto;padding:2px 8px;font-size:11px" onclick="dmToTodo(0,' + mi.idx + ')">+ 转为待办</button>'
+          + '</div>';
+      });
+      html += '</div>';
+    });
+  }
+
+  // === 群聊：@我的消息 ===
+  if(state.groupAtMe && state.groupAtMe.length > 0){
+    hasContent = true;
+    html += '<div class="section-label">群聊 @我 <span style="float:right;font-weight:400;text-transform:none">需要关注 · 点击 + 转为待办</span></div>';
+    var grpGroups = groupByAuthor(state.groupAtMe);
+    grpGroups.forEach(function(g){
+      var msgs = g.msgs;
+      var latestTime = "";
+      msgs.forEach(function(mi){
+        var t = mi.m.created_at ? mi.m.created_at.substring(11, 16) : "";
+        if(t > latestTime) latestTime = t;
+      });
+      html += '<div class="cal-item" style="border-left-color:var(--accent)">'
+        + '<div class="cal-time">' + esc(latestTime) + ' · ' + esc(g.author) + ' <span style="color:var(--text-dim);font-size:11px">群: ' + esc(g.chat_name) + ' (' + msgs.length + '条)</span></div>';
+      msgs.forEach(function(mi){
+        var timeStr = mi.m.created_at ? mi.m.created_at.substring(11, 16) : "";
+        html += '<div class="cal-title" style="margin-top:6px;padding-left:8px;border-left:2px solid rgba(233,69,96,.2)">' + esc(mi.m.text) + '</div>'
+          + '<div style="display:flex;align-items:center;gap:8px;margin-top:2px;padding-left:8px">'
+          + '<span style="font-size:10px;color:var(--text-dim)">' + esc(timeStr) + '</span>'
+          + '<button class="process-btn" style="margin:0;width:auto;padding:2px 8px;font-size:11px" onclick="dmToTodo(1,' + mi.idx + ')">+ 转为待办</button>'
+          + '</div>';
+      });
+      html += '</div>';
+    });
+  }
+
+  if(!hasContent){
+    list.innerHTML = '<div class="empty">暂无需要关注的消息</div>';
+  } else {
+    list.innerHTML = html;
+  }
+}
+
+async function dmToTodo(type, idx){
+  var m = (type === 0) ? state.dmOthers[idx] : state.groupAtMe[idx];
+  if(!m) return;
+  var title = m.text;
+  if(title.length > 80) title = title.substring(0, 80) + "...";
+  var source = (type === 0) ? ("私聊来自 " + m.author) : ("群聊 " + m.chat_name + " @我 " + m.author);
+  var res = await api("/api/local/todos/create","POST",{title:title,priority:"medium",progress:source});
+  if(res.ok){ toast("已从消息创建待办"); refresh(); }
+  else toast("创建失败");
 }
 
 // Local todo management
