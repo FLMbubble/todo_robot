@@ -42,6 +42,11 @@ body{font-family:-apple-system,"PingFang SC","Helvetica Neue",sans-serif;backgro
 .todo-meta{font-size:11px;color:var(--text-dim);margin-top:3px;display:flex;gap:8px;align-items:center}
 .priority-dot{width:8px;height:8px;border-radius:50%;display:inline-block}
 .p-high{background:var(--red)}.p-medium{background:var(--yellow)}.p-low{background:var(--green)}.p-none{background:var(--text-dim);opacity:.4}
+.date-nav{display:flex;gap:6px;align-items:center;padding:6px 12px;background:rgba(255,255,255,.03);border-bottom:1px solid rgba(255,255,255,.06)}
+.date-nav button{background:rgba(255,255,255,.08);border:none;color:var(--text);border-radius:6px;padding:4px 10px;cursor:pointer;font-size:14px;transition:all .2s}
+.date-nav button:hover{background:rgba(255,255,255,.15)}
+.date-nav input[type=date]{background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);border-radius:6px;padding:3px 6px;color:var(--text);font-size:12px;outline:none;color-scheme:dark}
+.date-nav .date-label{font-size:12px;color:var(--text-dim);flex:1}
 .add-bar{display:flex;gap:8px;margin-bottom:10px;align-items:center}
 .add-bar input{flex:1;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);border-radius:8px;padding:8px 12px;color:var(--text);font-size:13px;outline:none}
 .add-bar input:focus{border-color:var(--accent)}
@@ -95,11 +100,19 @@ body{font-family:-apple-system,"PingFang SC","Helvetica Neue",sans-serif;backgro
       <button class="icon-btn" onclick="togglePanel()" title="收起">&#10005;</button>
     </div>
   </div>
+  <div class="date-nav">
+    <button onclick="shiftDate(-1)" title="前一天">&lt;</button>
+    <input type="date" id="datePicker" onchange="onDatePick(this.value)" style="width:130px">
+    <button onclick="shiftDate(1)" title="后一天">&gt;</button>
+    <span class="date-label" id="dateNavLabel"></span>
+    <button onclick="goToday()" title="今天" style="font-size:12px;padding:4px 8px">今天</button>
+  </div>
   <div class="tabs">
     <div class="tab active" onclick="switchTab('todos')" id="tab-todos">&#128221; 待办</div>
     <div class="tab" onclick="switchTab('calendar')" id="tab-calendar">&#128197; 日程</div>
     <div class="tab" onclick="switchTab('docs')" id="tab-docs">&#128196; 文档</div>
     <div class="tab" onclick="switchTab('okr')" id="tab-okr">&#127919; OKR</div>
+    <div class="tab" onclick="switchTab('uncompleted')" id="tab-uncompleted">&#128230; 累计</div>
     <div class="tab" onclick="switchTab('dm')" id="tab-dm">&#128172; 消息</div>
   </div>
   <div class="tab-content" id="content-todos">
@@ -118,6 +131,7 @@ body{font-family:-apple-system,"PingFang SC","Helvetica Neue",sans-serif;backgro
   <div class="tab-content" id="content-calendar" style="display:none"><div id="calList"></div></div>
   <div class="tab-content" id="content-docs" style="display:none"><div id="docList"></div></div>
   <div class="tab-content" id="content-okr" style="display:none"><div id="okrList"></div></div>
+  <div class="tab-content" id="content-uncompleted" style="display:none"><div id="uncompletedList"></div></div>
   <div class="tab-content" id="content-dm" style="display:none"><div id="dmList"></div></div>
   <div class="sync-bar">
     <button class="sync-btn" onclick="syncDaily()" id="syncDailyBtn">&#128229; 同步到日报</button>
@@ -137,7 +151,7 @@ function esc(s){
 var state = {
   todos: [], localTodos: [], calendar: [],
   dailyDocs: [], weeklyDocs: [], okrDocs: [],
-  docTodos: [], docDrafts: [], docId: null, okrTodos: [], weeklyTodos: [], dmOthers: [], groupAtMe: []
+  docTodos: [], docDrafts: [], docId: null, okrTodos: [], weeklyTodos: [], dmOthers: [], groupAtMe: [], selectedDate: "", localDates: [], uncompletedData: null
 };
 
 async function api(url, method, body){
@@ -173,6 +187,32 @@ function switchTab(tab){
   document.getElementById("content-"+tab).style.display="block";
 }
 
+function todayStr(){
+  var d = new Date();
+  return d.getFullYear() + "-" + String(d.getMonth()+1).padStart(2,"0") + "-" + String(d.getDate()).padStart(2,"0");
+}
+
+function shiftDate(days){
+  var cur = state.selectedDate || todayStr();
+  var d = new Date(cur);
+  d.setDate(d.getDate() + days);
+  var s = d.getFullYear() + "-" + String(d.getMonth()+1).padStart(2,"0") + "-" + String(d.getDate()).padStart(2,"0");
+  state.selectedDate = s;
+  document.getElementById("datePicker").value = s;
+  refresh();
+}
+
+function onDatePick(val){
+  state.selectedDate = val || todayStr();
+  refresh();
+}
+
+function goToday(){
+  state.selectedDate = todayStr();
+  document.getElementById("datePicker").value = state.selectedDate;
+  refresh();
+}
+
 async function refresh(){
   console.log("[TODO Robot] refresh called");
   document.getElementById("todoList").innerHTML = '<div class="loading">加载中...</div>';
@@ -180,6 +220,7 @@ async function refresh(){
   document.getElementById("docList").innerHTML = '<div class="loading">加载中...</div>';
   document.getElementById("okrList").innerHTML = '<div class="loading">加载中...</div>';
   document.getElementById("dmList").innerHTML = '<div class="loading">加载中...</div>';
+  document.getElementById("uncompletedList").innerHTML = '<div class="loading">加载中...</div>';
   try{
     document.getElementById("apiStatus").textContent = "正在加载...";
     var res = await api("/api/summary");
@@ -191,6 +232,22 @@ async function refresh(){
     var d = res.data;
     state.todos = d.todos || [];
     state.localTodos = d.local_todos || [];
+    state.localDates = d.local_dates || [];
+    // If user picked a different date, load that date's todos
+    var picked = state.selectedDate || todayStr();
+    if(picked !== d.today.split(" ")[0]){
+      try{
+        var dr = await api("/api/local/todos?date=" + picked);
+        if(dr.ok){ state.localTodos = dr.data; }
+      }catch(e){}
+    }
+    // Update date nav UI
+    document.getElementById("datePicker").value = picked;
+    var isToday = (picked === todayStr());
+    document.getElementById("dateNavLabel").textContent = isToday ? "今天" : ("历史: " + picked);
+    if(state.localDates.length > 0){
+      document.getElementById("dateNavLabel").textContent += " (有记录: " + state.localDates.join(", ") + ")";
+    }
     state.docTodos = d.doc_todos || [];
     state.docDrafts = d.doc_drafts || [];
     state.docId = d.daily_doc_id || null;
@@ -219,6 +276,7 @@ async function refresh(){
     renderDocs();
     renderOKR();
     renderDM();
+    renderUncompleted();
   }catch(err){
     console.error("refresh error:", err);
     document.getElementById("todoList").innerHTML = '<div class="empty">加载错误: ' + esc(err.message) + "</div>";
@@ -229,7 +287,9 @@ function renderTodos(){
   var list = document.getElementById("todoList");
   var html = "";
   // Local todos
-  html += '<div class="section-label">今日待办 (本地存储)</div>';
+  var pickedDate = state.selectedDate || todayStr();
+  var isToday = (pickedDate === todayStr());
+  html += '<div class="section-label">' + (isToday ? "今日待办" : ("历史待办 " + pickedDate)) + ' (本地存储)</div>';
   if(state.localTodos && state.localTodos.length > 0){
     var sorted = state.localTodos.slice().sort(function(a,b){
       if(a.completed !== b.completed) return a.completed ? 1 : -1;
@@ -349,6 +409,59 @@ function renderOKR(){
   list.innerHTML = '<div class="empty">暂无OKR数据</div>';
 }
 
+async function renderUncompleted(){
+  var list = document.getElementById("uncompletedList");
+  try{
+    var res = await api("/api/local/uncompleted");
+    if(!res.ok){
+      list.innerHTML = '<div class="empty">加载失败</div>';
+      return;
+    }
+    var data = res.data;
+    state.uncompletedData = data;
+    var items = data.items || [];
+    var total = data.total || 0;
+    if(total === 0){
+      list.innerHTML = '<div class="empty">没有未完成待办</div>';
+      return;
+    }
+    var html = '<div class="section-label">累计未完成 <span style="float:right;font-weight:400;text-transform:none">共 ' + total + ' 条</span></div>';
+    items.forEach(function(group){
+      var isToday = (group.date === todayStr());
+      html += '<div class="section-label" style="margin-top:8px;color:var(--accent)">' + (isToday ? "今天" : group.date) + ' (' + group.count + '条未完成)</div>';
+      group.todos.forEach(function(t){
+        var priDot = {high:"p-high",medium:"p-medium",low:"p-low",none:"p-none"}[t.priority] || "p-none";
+        html += '<div class="todo-item">'
+          + '<div class="todo-checkbox" onclick="toggleUncompletedTodo(this)" data-todo-id="' + t.id + '" data-date="' + group.date + '" data-completed="' + t.completed + '"></div>'
+          + '<div class="todo-body" onclick="jumpToDate(\'' + group.date + '\')">'
+          + '<div class="todo-title">' + esc(t.title) + '</div>'
+          + '<div class="todo-meta"><span class="priority-dot ' + priDot + '"></span>'
+          + (t.progress ? '<span>' + esc(t.progress) + '</span>' : '')
+          + '<span>' + esc(group.date) + '</span></div></div></div>';
+      });
+    });
+    list.innerHTML = html;
+  }catch(err){
+    list.innerHTML = '<div class="empty">加载错误: ' + esc(err.message) + '</div>';
+  }
+}
+
+function jumpToDate(dateStr){
+  state.selectedDate = dateStr;
+  document.getElementById("datePicker").value = dateStr;
+  switchTab("todos");
+  refresh();
+}
+
+async function toggleUncompletedTodo(el){
+  var todoId = parseInt(el.getAttribute("data-todo-id"));
+  var dateStr = el.getAttribute("data-date");
+  var completed = el.getAttribute("data-completed") === "true";
+  var res = await api("/api/local/todos/toggle","POST",{id:todoId,completed:!completed,date:dateStr});
+  if(res.ok){ toast(completed ? "已恢复" : "已完成"); refresh(); renderUncompleted(); }
+  else toast("操作失败");
+}
+
 function renderDM(){
   var list = document.getElementById("dmList");
   var html = "";
@@ -445,20 +558,20 @@ async function addLocalTodo(){
   var priority = document.getElementById("newPriority").value;
   var title = input.value.trim();
   if(!title) return;
-  var res = await api("/api/local/todos/create","POST",{title:title,priority:priority});
+  var res = await api("/api/local/todos/create","POST",{title:title,priority:priority,date:state.selectedDate});
   if(res.ok){ input.value=""; toast("已添加本地待办"); refresh(); }
   else toast("添加失败");
 }
 
 async function toggleLocalTodo(id, completed){
-  var res = await api("/api/local/todos/toggle","POST",{id:id,completed:!completed});
+  var res = await api("/api/local/todos/toggle","POST",{id:id,completed:!completed,date:state.selectedDate});
   if(res.ok){ toast(completed?"已恢复":"已完成"); refresh(); }
   else toast("操作失败");
 }
 
 async function deleteLocalTodo(id){
   if(!confirm("确定删除此待办?")) return;
-  var res = await api("/api/local/todos/delete","POST",{id:id});
+  var res = await api("/api/local/todos/delete","POST",{id:id,date:state.selectedDate});
   if(res.ok){ toast("已删除"); refresh(); }
   else toast("删除失败");
 }
@@ -475,7 +588,7 @@ function openEditLocalTodo(id){
 }
 
 async function updateLocalTodoApi(id, title, progress){
-  var res = await api("/api/local/todos/update","POST",{id:id,title:title,progress:progress});
+  var res = await api("/api/local/todos/update","POST",{id:id,title:title,progress:progress,date:state.selectedDate});
   if(res.ok){ toast("已更新"); refresh(); }
   else toast("更新失败");
 }
@@ -483,7 +596,7 @@ async function updateLocalTodoApi(id, title, progress){
 async function syncLocalToCooper(){
   var btn = event.target;
   btn.disabled = true; btn.textContent = "同步中...";
-  var res = await api("/api/local/sync","POST");
+  var res = await api("/api/local/sync","POST",{date:state.selectedDate});
   btn.disabled = false; btn.textContent = "同步到 Cooper 日报";
   if(res.ok){
     toast("已同步 " + (res.data.synced||0) + "/" + (res.data.total||0) + " 条待办");
@@ -563,6 +676,7 @@ ball.addEventListener("click", function(e){
 
 // Init
 console.log("[TODO Robot v4.0] Initializing...");
+state.selectedDate = todayStr();
 refresh();
 setInterval(refresh, 300000);
 setTimeout(function(){

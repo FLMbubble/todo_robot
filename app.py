@@ -22,7 +22,7 @@ from concurrent.futures import ThreadPoolExecutor
 DWS_BIN = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".dws", "dws")
 TIMEZONE = "Asia/Shanghai"
 SHANGHAI_TZ = timezone(timedelta(hours=8))
-PORT = 8511
+PORT = 8516
 
 # ---- 日报/周报文档映射配置 (可按需修改) ----
 # 通过日期自动生成日报文档标题，周报同理
@@ -235,6 +235,22 @@ def list_local_dates():
             dates.append(ds)
     dates.sort(reverse=True)
     return dates
+
+def get_all_uncompleted_todos():
+    """遍历所有日期的本地待办，返回所有未完成的待办（按日期分组）。
+    返回: [{date, todos: [...]}, ...]
+    """
+    dates = list_local_dates()
+    result = []
+    total = 0
+    for date_str in dates:
+        todos = load_local_todos(date_str)
+        uncompleted = [t for t in todos if not t.get("completed", False)]
+        if uncompleted:
+            result.append({"date": date_str, "todos": uncompleted, "count": len(uncompleted)})
+            total += len(uncompleted)
+    return {"items": result, "total": total}
+
 
 def sync_local_to_cooper(date_str=None):
     """将本地待办同步到 Cooper 日报文档。
@@ -1709,6 +1725,8 @@ class TodoRobotHandler(http.server.BaseHTTPRequestHandler):
             self._handle_get_local_todos(params)
         elif path == "/api/local/dates":
             self._handle_list_local_dates()
+        elif path == "/api/local/uncompleted":
+            self._handle_get_uncompleted()
         elif path == "/api/summary":
             self._handle_get_summary()
         else:
@@ -2010,6 +2028,10 @@ class TodoRobotHandler(http.server.BaseHTTPRequestHandler):
     def _handle_list_local_dates(self):
         dates = list_local_dates()
         self._json({"ok": True, "data": dates})
+
+    def _handle_get_uncompleted(self):
+        result = get_all_uncompleted_todos()
+        self._json({"ok": True, "data": result})
 
     def _handle_create_local_todo(self, body):
         title = body.get("title", "").strip()
