@@ -1,5 +1,6 @@
 #!/bin/bash
 # TODO Robot 悬浮球启动脚本
+pkill -f [a]pp.py
 cd "$(dirname "$0")"
 
 # 检查 dws 二进制

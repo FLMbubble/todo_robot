@@ -54,6 +54,9 @@ OKR_DOC_PATTERN = r"OKR|okr|季度|目标"          # 季度OKR
 _CACHE = {}
 _CACHE_TTL = 60  # 秒：文档列表/日历等缓存有效期
 _CACHE_LOCK = threading.Lock()
+_SUMMARY_BUILDERS = {}
+_SUMMARY_BUILDERS_LOCK = threading.Lock()
+_SUMMARY_EXECUTOR = ThreadPoolExecutor(max_workers=1)
 
 def cache_get(key, ttl=_CACHE_TTL):
     with _CACHE_LOCK:
@@ -80,7 +83,6 @@ def cache_invalidate(key=None):
                 _CACHE.pop(key, None)
         else:
             _CACHE.clear()
-
 
 def run_dws(args, timeout=30):
     """执行 dws CLI 命令，返回解析后的 JSON dict"""
@@ -1867,7 +1869,7 @@ class TodoRobotHandler(http.server.BaseHTTPRequestHandler):
         elif path == "/api/local/uncompleted":
             self._handle_get_uncompleted()
         elif path == "/api/summary":
-            self._handle_get_summary()
+            self._handle_get_summary(params)
         else:
             self._json({"error": "not found"}, 404)
 
@@ -1918,6 +1920,7 @@ class TodoRobotHandler(http.server.BaseHTTPRequestHandler):
             self._handle_diag(body)
         else:
             self._json({"error": "not found"}, 404)
+        cache_invalidate("summary")
 
     def _read_body(self):
         length = int(self.headers.get("Content-Length", 0))
@@ -2240,7 +2243,7 @@ class TodoRobotHandler(http.server.BaseHTTPRequestHandler):
         print(f"[DIAG {ts}] {json.dumps(body, ensure_ascii=False)}")
         self._json({"ok": True})
 
-    def _handle_get_summary(self):
+    def _build_summary_data(self):
         """一次性获取所有面板数据（并行获取 + 缓存）"""
         with ThreadPoolExecutor(max_workers=4) as pool:
             fut_todos = pool.submit(get_todos)
@@ -2340,26 +2343,60 @@ class TodoRobotHandler(http.server.BaseHTTPRequestHandler):
         weekly_todos = load_local_todos(today_key, f"weekly-{today_key}.json")
         okr_todos = load_local_todos(today_key, f"okr-{today_key}.json")
 
-        self._json({
-            "ok": True,
-            "data": {
-                "todos": todo_fmt,
-                "local_todos": local_todos,
-                "local_dates": local_dates,
-                "doc_todos": doc_todos,
-                "doc_drafts": doc_drafts,
-                "daily_doc_id": daily_doc_id,
-                "calendar": cal_fmt,
-                "daily_docs": fmt_docs(daily_docs),
-                "weekly_docs": fmt_docs(weekly_docs),
-                "okr_docs": fmt_docs(okr_docs),
-                "weekly_todos": weekly_todos,
-                "okr_todos": okr_todos,
-                "dm_messages": dm_messages,
-                "today": datetime.now(SHANGHAI_TZ).strftime("%Y-%m-%d %A"),
-                "week": datetime.now(SHANGHAI_TZ).isocalendar()[1],
-            }
-        })
+        return {
+            "todos": todo_fmt,
+            "local_todos": local_todos,
+            "local_dates": local_dates,
+            "doc_todos": doc_todos,
+            "doc_drafts": doc_drafts,
+            "daily_doc_id": daily_doc_id,
+            "calendar": cal_fmt,
+            "daily_docs": fmt_docs(daily_docs),
+            "weekly_docs": fmt_docs(weekly_docs),
+            "okr_docs": fmt_docs(okr_docs),
+            "weekly_todos": weekly_todos,
+            "okr_todos": okr_todos,
+            "dm_messages": dm_messages,
+            "today": datetime.now(SHANGHAI_TZ).strftime("%Y-%m-%d %A"),
+            "week": datetime.now(SHANGHAI_TZ).isocalendar()[1],
+        }
+
+    def _handle_get_summary(self, params=None):
+        force = bool(params and params.get("refresh"))
+        cached = None if force else cache_get("summary", ttl=15)
+        if cached is not None:
+            self._json({"ok": True, "data": cached})
+            return
+
+        with _SUMMARY_BUILDERS_LOCK:
+            entry = _SUMMARY_BUILDERS.get("summary")
+            if entry is None:
+                entry = {"future": None, "done": threading.Event()}
+                entry["future"] = _SUMMARY_EXECUTOR.submit(self._build_summary_data)
+                _SUMMARY_BUILDERS["summary"] = entry
+                owner = True
+            else:
+                owner = False
+
+        if owner:
+            try:
+                data = entry["future"].result()
+                cache_set("summary", data, ttl=15)
+                self._json({"ok": True, "data": data})
+            except Exception as exc:
+                self._json({"ok": False, "error": str(exc)}, 500)
+            finally:
+                entry["done"].set()
+                with _SUMMARY_BUILDERS_LOCK:
+                    if _SUMMARY_BUILDERS.get("summary") is entry:
+                        del _SUMMARY_BUILDERS["summary"]
+        else:
+            entry["done"].wait()
+            cached = cache_get("summary", ttl=15)
+            if cached is not None:
+                self._json({"ok": True, "data": cached})
+            else:
+                self._json({"ok": False, "error": "summary build failed"}, 500)
 
     # ---- POST handlers ----
 

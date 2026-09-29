@@ -96,7 +96,7 @@ body{font-family:-apple-system,"PingFang SC","Helvetica Neue",sans-serif;backgro
       <div id="apiStatus" style="font-size:10px;color:var(--text-dim);margin-top:2px"></div>
     </div>
     <div class="header-actions">
-      <button class="icon-btn" onclick="refresh()" title="刷新">&#128260;</button>
+      <button class="icon-btn" onclick="refresh(true)" title="刷新">&#128260;</button>
       <button class="icon-btn" onclick="togglePanel()" title="收起">&#10005;</button>
     </div>
   </div>
@@ -151,7 +151,8 @@ function esc(s){
 var state = {
   todos: [], localTodos: [], calendar: [],
   dailyDocs: [], weeklyDocs: [], okrDocs: [],
-  docTodos: [], docDrafts: [], docId: null, okrTodos: [], weeklyTodos: [], dmOthers: [], groupAtMe: [], selectedDate: "", localDates: [], uncompletedData: null
+  docTodos: [], docDrafts: [], docId: null, okrTodos: [], weeklyTodos: [], dmOthers: [], groupAtMe: [], selectedDate: "", localDates: [], uncompletedData: null,
+  hasLoaded: false, refreshPromise: null
 };
 
 async function api(url, method, body){
@@ -213,17 +214,22 @@ function goToday(){
   refresh();
 }
 
-async function refresh(){
+async function refresh(force){
   console.log("[TODO Robot] refresh called");
-  document.getElementById("todoList").innerHTML = '<div class="loading">加载中...</div>';
-  document.getElementById("calList").innerHTML = '<div class="loading">加载中...</div>';
-  document.getElementById("docList").innerHTML = '<div class="loading">加载中...</div>';
-  document.getElementById("okrList").innerHTML = '<div class="loading">加载中...</div>';
-  document.getElementById("dmList").innerHTML = '<div class="loading">加载中...</div>';
-  document.getElementById("uncompletedList").innerHTML = '<div class="loading">加载中...</div>';
+  if(state.refreshPromise && !force) return state.refreshPromise;
+  if(!state.hasLoaded){
+    ["todoList", "calList", "docList", "okrList", "dmList", "uncompletedList"].forEach(function(id){
+      document.getElementById(id).innerHTML = '<div class="loading">加载中...</div>';
+    });
+  }
   try{
     document.getElementById("apiStatus").textContent = "正在加载...";
-    var res = await api("/api/summary");
+    var request = api(force ? "/api/summary?refresh=1" : "/api/summary").then(function(res){
+      if(!res.ok) throw new Error(res.error || "summary failed");
+      return res;
+    });
+    state.refreshPromise = request;
+    var res = await request;
     if(!res.ok){
       document.getElementById("apiStatus").textContent = "API错误";
       document.getElementById("todoList").innerHTML = '<div class="empty">加载失败</div>';
@@ -277,9 +283,12 @@ async function refresh(){
     renderOKR();
     renderDM();
     renderUncompleted();
+    state.hasLoaded = true;
   }catch(err){
     console.error("refresh error:", err);
     document.getElementById("todoList").innerHTML = '<div class="empty">加载错误: ' + esc(err.message) + "</div>";
+  }finally{
+    if(state.refreshPromise === request) state.refreshPromise = null;
   }
 }
 
