@@ -22,7 +22,7 @@ from concurrent.futures import ThreadPoolExecutor
 DWS_BIN = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".dws", "dws")
 TIMEZONE = "Asia/Shanghai"
 SHANGHAI_TZ = timezone(timedelta(hours=8))
-PORT = 8516
+PORT = 8527
 
 # ---- 日报/周报文档映射配置 (可按需修改) ----
 # 通过日期自动生成日报文档标题，周报同理
@@ -37,8 +37,14 @@ DAILY_SPACE_ID = 0                                    # 个人空间
 DAILY_ROOT_FOLDER_ID = 2209182943521                   # "Daily" 文件夹
 # 月份子文件夹会在同步时自动查找或创建 (如 "2026.09")
 
+# 周报文档存放的 Cooper 个人空间文件夹
+WEEKLY_SPACE_ID = 0                                     # 个人空间
+WEEKLY_ROOT_FOLDER_ID = 2209053162058                   # "weekly" 文件夹
+
 # 记录最近同步创建的日报文档 ID (date_str -> resource_id)
 _RECENT_SYNCED_DOCS = {}
+# 记录最近同步创建的周报文档 ID (week_title -> resource_id)
+_RECENT_SYNCED_WEEKLY = {}
 WEEKLY_DOC_PATTERN = r"周报|weekly|week"       # 如 38周报 / 周报 / weekly
 OKR_DOC_PATTERN = r"OKR|okr|季度|目标"          # 季度OKR
 
@@ -545,15 +551,59 @@ def find_daily_report_docs():
 
 
 def find_weekly_report_docs():
-    """查找周报文档"""
-    docs = get_recent_docs()
+    """查找周报文档 — 优先从 weekly 文件夹查找，回退到最近文档列表"""
     weekly = []
+    seen_ids = set()
+
+    # 1. 从 weekly 文件夹查找
+    folder_docs = list_folder_docs_generic(WEEKLY_SPACE_ID, WEEKLY_ROOT_FOLDER_ID)
+    for doc in folder_docs:
+        name = doc.get("resourceName", "")
+        if re.search(WEEKLY_DOC_PATTERN, name):
+            weekly.append(doc)
+            seen_ids.add(doc.get("resourceId"))
+
+    # 2. 回退到最近文档列表
+    docs = get_recent_docs()
     for doc in docs:
         name = doc.get("resourceName", "")
         path = doc.get("filePath", "")
-        if re.search(WEEKLY_DOC_PATTERN, name) or re.search(WEEKLY_DOC_PATTERN, path):
+        rid = doc.get("resourceId")
+        rtype = doc.get("resourceTypeStr", "")
+        if (re.search(WEEKLY_DOC_PATTERN, name) or re.search(WEEKLY_DOC_PATTERN, path)) and rid not in seen_ids and rtype == "NEWDOC":
             weekly.append(doc)
+            seen_ids.add(rid)
+
     return weekly
+
+
+def list_folder_docs_generic(space_id, parent_id):
+    """列出某个空间文件夹下的所有文档（通用版）"""
+    if not parent_id:
+        return []
+    res = run_dws([
+        "space", "list",
+        "--space-id", str(space_id),
+        "--parent-id", str(parent_id),
+        "--output", "json"
+    ], timeout=15)
+    if not res.get("ok"):
+        return []
+    d = res.get("data", {})
+    if isinstance(d, dict):
+        items = d.get("data", {}).get("items", []) if isinstance(d.get("data"), dict) else d.get("items", [])
+    else:
+        items = []
+    docs = []
+    for item in items:
+        if item.get("space_resource_type") in ("NEWDOC", "SHIMO2_DOC", "DK_PAGE"):
+            docs.append({
+                "resourceId": item.get("id"),
+                "resourceName": item.get("display_name", ""),
+                "resourceTypeStr": item.get("space_resource_type", ""),
+                "filePath": "",
+            })
+    return docs
 
 
 def find_okr_docs():
@@ -634,8 +684,24 @@ def get_dm_messages(max_chats=15, msg_per_chat=10):
     chats = chat_data.get("data", {}).get("chats", [])
     current_ms = now_ms()
 
-    # Separate private chats and group chats
-    p2p_chats = [c for c in chats if c.get("type") in ("p2p", "p2ai")]
+    # 服务号/机器人/助手名称关键词 — 这些发送的消息通常是日程/待办通知，需要过滤
+    SERVICE_KEYWORDS = [
+        "assistant", "bot", "助手", "calendar", "日历", "todo", "待办", "提醒",
+        "中心", "通知", "approval", "审批", "客服", "support", "smartwork",
+        "regression", "orion", "voyager", "pop", "simone", "trail",
+        "oe", "eec", "dhr", "d-hrssc", "信息安全", "数梦", "桔子堆",
+        "圈子", "资产平台", "食域", "代码review", "智能搜索", "文案",
+        "mbti", "文本纠错", "爬树", "党、团", "超级助手",
+        "系统消息", "桔厂资讯", "入群申请", "钱包", "文件助手",
+        "外部联系人", "办公网p0", "smartwork服务号",
+    ]
+
+    def is_service_chat(chat):
+        name = (chat.get("name", "") or "").lower()
+        return any(kw in name for kw in SERVICE_KEYWORDS)
+
+    # Separate private chats and group chats, filtering out service/bot accounts
+    p2p_chats = [c for c in chats if c.get("type") in ("p2p", "p2ai") and not is_service_chat(c)]
     p2p_chats.sort(key=lambda c: c.get("latest_ts", 0), reverse=True)
     p2p_chats = p2p_chats[:max_chats]
 
@@ -935,34 +1001,69 @@ def sync_todo_to_daily_report(todo_items):
         return {"action": "created", "resource_id": resource_id, "title": today_title}
 
 
-def sync_todo_to_weekly_report(todo_items):
-    """将待办同步到周报文档"""
+def sync_todo_to_weekly_report(todo_items=None):
+    """将本地待办同步到周报文档。
+    遍历本周（周一到周日）所有日期的本地待办，汇总到周报。
+    周报文档存放在 weekly 文件夹下，标题格式: "YYYY/MM/DD-DD"。
+    文档结构: # TO DO (未完成) + # Progress (已完成)
+    """
     now = datetime.now(SHANGHAI_TZ)
-    week_num = now.isocalendar()[1]
-    week_title = f"W{week_num} 周报"
 
-    # 按日期分组
+    # 计算本周的日期范围（周一到周日）
+    iso = now.isocalendar()
+    monday = datetime.fromisocalendar(iso[0], iso[1], 1)
+    sunday = datetime.fromisocalendar(iso[0], iso[1], 7)
+    dates = [(monday + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(7)]
+
+    # 周报标题: YYYY/MM/DD-DD (周一-周日)
+    week_title = f"{monday.strftime('%Y/%m/%d')}-{sunday.strftime('%d')}"
+
+    # 按日期收集本地待办
     by_date = {}
-    for t in todo_items:
-        due = t.get("due_time") or t.get("created_at")
-        if due and due > 0:
-            date_str = ms_to_date_str(due, "%m-%d")
-        else:
-            date_str = "未排期"
-        by_date.setdefault(date_str, []).append(t)
+    total = 0
+    for date_str in dates:
+        todos = load_local_todos(date_str)
+        if todos:
+            by_date[date_str] = todos
+            total += len(todos)
 
+    # 分为未完成和已完成
+    priority_map = {"high": "高", "medium": "中", "low": "低", "none": ""}
+    todo_items_list = []  # 未完成
+    progress_items_list = []  # 已完成
+    for date_str in dates:
+        if date_str in by_date:
+            for t in by_date[date_str]:
+                entry = {
+                    "date": date_str[5:],  # MM-DD
+                    "title": t.get("title", ""),
+                    "priority": priority_map.get(t.get("priority", "none"), ""),
+                    "progress": t.get("progress", ""),
+                    "completed": t.get("completed", False),
+                }
+                if t.get("completed"):
+                    progress_items_list.append(entry)
+                else:
+                    todo_items_list.append(entry)
+
+    # 构建周报 markdown 内容
     content = f"# {week_title}\n\n"
-    for date_str in sorted(by_date.keys()):
-        items = by_date[date_str]
-        content += f"## {date_str}\n\n"
-        for t in items:
-            title = t.get("title", t.get("new_title", ""))
-            status = t.get("status", 2)
-            mark = "✅" if status == 3 else "⬜"
-            content += f"- {mark} {title}\n"
-        content += "\n"
+    # TO DO 部分（未完成）
+    content += "# TO DO\n\n"
+    content += "| 日期 | 任务 | 优先级 | 进度说明 |\n"
+    content += "| --- | --- | --- | --- |\n"
+    for item in todo_items_list:
+        content += f"| {item['date']} | {item['title']} | {item['priority']} | {item['progress']} |\n"
+    content += "\n"
+    # Progress 部分（已完成）
+    content += "# Progress\n\n"
+    content += "| 日期 | 任务 | 优先级 | 进度说明 |\n"
+    content += "| --- | --- | --- | --- |\n"
+    for item in progress_items_list:
+        content += f"| {item['date']} | {item['title']} | {item['priority']} | {item['progress']} |\n"
+    content += "\n"
 
-    # 查找周报
+    # 查找周报文档
     weekly_docs = find_weekly_report_docs()
     target_doc = None
     for doc in weekly_docs:
@@ -971,26 +1072,58 @@ def sync_todo_to_weekly_report(todo_items):
             break
 
     if target_doc:
-        # 在现有周报末尾追加同步概览
+        # 更新已有周报 — 重建 TO DO 和 Progress 表格
         resource_id = target_doc.get("resourceId")
-        sync_section = f"\n---\n## 待办同步 ({now.strftime('%m-%d %H:%M')})\n\n"
-        for date_str in sorted(by_date.keys()):
-            items = by_date[date_str]
-            sync_section += f"### {date_str}\n"
-            for t in items:
-                title = t.get("title", t.get("new_title", ""))
-                status = t.get("status", 2)
-                mark = "✅" if status == 3 else "⬜"
-                sync_section += f"- {mark} {title}\n"
-            sync_section += "\n"
-        append_to_doc(resource_id, sync_section)
-        return {"action": "updated", "resource_id": resource_id, "title": week_title}
+        if not resource_id:
+            return {"action": "error", "error": "目标文档无 resourceId", "synced": 0}
+
+        # 删除旧内容，用 markdown 重建
+        # 先 pull 获取所有块，删除所有内容块
+        pull = run_dws([
+            "doc", "update-v2", str(resource_id),
+            "--app", "cooper", "--operation", "pull", "--output", "json"
+        ])
+        if pull.get("ok"):
+            blocks = pull.get("data", {}).get("content", []) if isinstance(pull.get("data"), dict) else []
+            for block in reversed(blocks):
+                anchor = block.get("anchor", "")
+                if anchor:
+                    run_dws([
+                        "doc", "update-v2", str(resource_id),
+                        "--app", "cooper", "--operation", "apply",
+                        "--apply-action", "delete_block",
+                        "--anchor", anchor,
+                        "--output", "json"
+                    ], timeout=10)
+
+        # 插入新内容
+        run_dws([
+            "doc", "update-v2", str(resource_id),
+            "--app", "cooper", "--operation", "apply",
+            "--apply-action", "insert_blocks",
+            "--position", "start",
+            "--text", content,
+            "--output", "json"
+        ], timeout=15)
+
+        cache_invalidate("recent_docs")
+        _RECENT_SYNCED_WEEKLY[week_title] = resource_id
+        return {"action": "updated", "resource_id": resource_id, "title": week_title, "synced": total, "total": total}
     else:
-        res = create_doc(week_title, content, kind="cooper")
+        # 创建新周报（在 weekly 文件夹下）
+        res = create_doc(week_title, content, kind="cooper",
+                         space_id=WEEKLY_SPACE_ID,
+                         parent_id=WEEKLY_ROOT_FOLDER_ID)
         resource_id = None
         if res.get("ok"):
             resource_id = res.get("data", {}).get("resourceId") or res.get("data", {}).get("id")
-        return {"action": "created", "resource_id": resource_id, "title": week_title}
+        cache_invalidate("recent_docs")
+
+        if not resource_id:
+            return {"action": "error", "error": "创建周报文档失败", "synced": 0}
+
+        _RECENT_SYNCED_WEEKLY[week_title] = resource_id
+        return {"action": "created", "resource_id": resource_id, "title": week_title, "synced": total, "total": total}
 
 
 # ==================== LLM 草稿处理 ====================
@@ -1320,8 +1453,8 @@ def process_drafts_to_todos(resource_id, app="cooper"):
 # 列索引: 0=任务, 1=优先级, 2=完成状态, 3=进度说明
 
 def find_todo_table(resource_id, app="cooper"):
-    """在文档中找到 TO DO 标题下的表格，返回表格 anchor
-    如果没有表格，返回 None。
+    """在文档中找到 TO DO 标题后的第一个表格，返回表格 anchor。
+    允许 TO DO 标题和表格之间有其他块（如 horizontal_rule、paragraph 等）。
     """
     pull = run_dws([
         "doc", "update-v2", str(resource_id),
@@ -1333,10 +1466,12 @@ def find_todo_table(resource_id, app="cooper"):
     content = pull.get("data", {}).get("content", []) if isinstance(pull.get("data"), dict) else []
     in_todo = False
     for block in content:
-        if block.get("type") == "heading":
+        btype = block.get("type", "")
+        if btype == "heading":
             txt = "".join(c.get("text", "") for c in block.get("content", []) if isinstance(c, dict))
-            in_todo = (txt.strip().upper() == "TO DO")
-        elif block.get("type") == "table" and in_todo:
+            if txt.strip().upper() == "TO DO":
+                in_todo = True
+        elif btype == "table" and in_todo:
             return block.get("anchor")
     return None
 
@@ -1354,14 +1489,16 @@ def parse_doc_todos(resource_id, app="cooper"):
 
     content = pull.get("data", {}).get("content", []) if isinstance(pull.get("data"), dict) else []
 
-    # 找到 TO DO 下的表格
+    # 找到 TO DO 下的第一个表格（允许中间有其他块）
     in_todo = False
     table_block = None
     for block in content:
-        if block.get("type") == "heading":
+        btype = block.get("type", "")
+        if btype == "heading":
             txt = "".join(c.get("text", "") for c in block.get("content", []) if isinstance(c, dict))
-            in_todo = (txt.strip().upper() == "TO DO")
-        elif block.get("type") == "table" and in_todo:
+            if txt.strip().upper() == "TO DO":
+                in_todo = True
+        elif btype == "table" and in_todo:
             table_block = block
             break
 
@@ -1680,12 +1817,14 @@ def ensure_todo_table(resource_id, app="cooper"):
             "--output", "json"
         ])
     else:
+        # 没有 TO DO 标题，用 markdown 方式插入标题和表格
+        table_md = "| 任务 | 优先级 | 完成状态 | 进度说明 |\n| --- | --- | --- | --- |\n"
         run_dws([
             "doc", "update-v2", str(resource_id),
             "--app", app, "--operation", "apply",
-            "--apply-action", "insert_nodes",
+            "--apply-action", "insert_blocks",
             "--position", "end",
-            "--nodes", json.dumps(nodes, ensure_ascii=False),
+            "--text", "# TO DO\n\n" + table_md,
             "--output", "json"
         ])
 
@@ -2276,8 +2415,7 @@ class TodoRobotHandler(http.server.BaseHTTPRequestHandler):
         self._json({"ok": True, "data": result})
 
     def _handle_sync_weekly(self):
-        todos = get_todos()
-        result = sync_todo_to_weekly_report(todos)
+        result = sync_todo_to_weekly_report()
         self._json({"ok": True, "data": result})
 
     def _handle_create_doc(self, body):
