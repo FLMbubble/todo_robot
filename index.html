@@ -130,7 +130,22 @@ body{font-family:-apple-system,"PingFang SC","Helvetica Neue",sans-serif;backgro
   </div>
   <div class="tab-content" id="content-calendar" style="display:none"><div id="calList"></div></div>
   <div class="tab-content" id="content-docs" style="display:none"><div id="docList"></div></div>
-  <div class="tab-content" id="content-okr" style="display:none"><div id="okrList"></div></div>
+  <div class="tab-content" id="content-okr" style="display:none">
+    <div class="add-bar">
+      <input type="text" id="newOkr" placeholder="输入 OKR 目标..." onkeypress="if(event.key==='Enter')addOkr()">
+      <input type="text" id="newOkrKeyResults" placeholder="关键结果，分号分隔" style="min-width:150px">
+      <select id="newOkrPriority">
+        <option value="P0">P0</option>
+        <option value="P1">P1</option>
+        <option value="P2" selected>P2</option>
+        <option value="P3">P3</option>
+      </select>
+      <input type="date" id="newOkrDdl" style="width:135px">
+      <button class="add-btn" onclick="addOkr()">+</button>
+    </div>
+    <div id="okrList"></div>
+    <button class="process-btn" id="syncOkrBtn" onclick="syncOkr()">同步到 OKR</button>
+  </div>
   <div class="tab-content" id="content-uncompleted" style="display:none"><div id="uncompletedList"></div></div>
   <div class="tab-content" id="content-dm" style="display:none"><div id="dmList"></div></div>
   <div class="sync-bar">
@@ -152,7 +167,7 @@ var state = {
   todos: [], localTodos: [], calendar: [],
   dailyDocs: [], weeklyDocs: [], okrDocs: [],
   docTodos: [], docDrafts: [], docId: null, okrTodos: [], weeklyTodos: [], dmOthers: [], groupAtMe: [], selectedDate: "", localDates: [], uncompletedData: null,
-  hasLoaded: false, refreshPromise: null
+  hasLoaded: false, refreshPromise: null, dateLoadPromise: null
 };
 
 async function api(url, method, body){
@@ -200,18 +215,19 @@ function shiftDate(days){
   var s = d.getFullYear() + "-" + String(d.getMonth()+1).padStart(2,"0") + "-" + String(d.getDate()).padStart(2,"0");
   state.selectedDate = s;
   document.getElementById("datePicker").value = s;
-  refresh();
+  loadSelectedDate();
 }
 
 function onDatePick(val){
   state.selectedDate = val || todayStr();
-  refresh();
+  loadSelectedDate();
 }
 
 function goToday(){
   state.selectedDate = todayStr();
   document.getElementById("datePicker").value = state.selectedDate;
-  refresh();
+  if(state.hasLoaded) loadSelectedDate();
+  else refresh();
 }
 
 async function refresh(force){
@@ -247,13 +263,7 @@ async function refresh(force){
         if(dr.ok){ state.localTodos = dr.data; }
       }catch(e){}
     }
-    // Update date nav UI
-    document.getElementById("datePicker").value = picked;
-    var isToday = (picked === todayStr());
-    document.getElementById("dateNavLabel").textContent = isToday ? "今天" : ("历史: " + picked);
-    if(state.localDates.length > 0){
-      document.getElementById("dateNavLabel").textContent += " (有记录: " + state.localDates.join(", ") + ")";
-    }
+    updateDateNav();
     state.docTodos = d.doc_todos || [];
     state.docDrafts = d.doc_drafts || [];
     state.docId = d.daily_doc_id || null;
@@ -270,12 +280,7 @@ async function refresh(force){
     state.groupAtMe = dmData.group_atme || [];
 
     document.getElementById("dateStr").textContent = d.today + " · 第" + d.week + "周";
-    var active = (state.localTodos||[]).filter(function(t){return !t.completed;}).length
-      + (state.todos||[]).filter(function(t){return !t.completed;}).length
-      + (state.docTodos||[]).filter(function(t){return !t.completed;}).length;
-    var badge = document.getElementById("todoBadge");
-    badge.textContent = active;
-    badge.style.display = active > 0 ? "flex" : "none";
+    updateBadge();
     document.getElementById("apiStatus").textContent = "本地 " + (state.localTodos||[]).length + " + D-Chat " + (state.todos||[]).length + " 项";
     renderTodos();
     renderCalendar();
@@ -289,6 +294,54 @@ async function refresh(force){
     document.getElementById("todoList").innerHTML = '<div class="empty">加载错误: ' + esc(err.message) + "</div>";
   }finally{
     if(state.refreshPromise === request) state.refreshPromise = null;
+  }
+}
+
+function updateDateNav(){
+  var picked = state.selectedDate || todayStr();
+  document.getElementById("datePicker").value = picked;
+  var isToday = (picked === todayStr());
+  var label = isToday ? "今天" : ("历史: " + picked);
+  if(state.localDates.length > 0){
+    label += " (有记录: " + state.localDates.join(", ") + ")";
+  }
+  document.getElementById("dateNavLabel").textContent = label;
+}
+
+function updateBadge(){
+  var active = (state.localTodos||[]).filter(function(t){return !t.completed;}).length
+    + (state.todos||[]).filter(function(t){return !t.completed;}).length
+    + (state.docTodos||[]).filter(function(t){return !t.completed;}).length;
+  var badge = document.getElementById("todoBadge");
+  badge.textContent = active;
+  badge.style.display = active > 0 ? "flex" : "none";
+}
+
+async function loadSelectedDate(){
+  if(!state.hasLoaded) return refresh();
+  var requestKey = state.selectedDate || todayStr();
+  if(state.dateLoadPromise && state.dateLoadPromise.key === requestKey){
+    return state.dateLoadPromise;
+  }
+
+  updateDateNav();
+  document.getElementById("todoList").innerHTML = '<div class="loading">加载本地待办...</div>';
+  var request = api("/api/local/todos?date=" + encodeURIComponent(requestKey));
+  var entry = {key: requestKey, request: request};
+  state.dateLoadPromise = entry;
+  try{
+    var res = await request;
+    if(entry !== state.dateLoadPromise) return;
+    if(!res.ok) throw new Error(res.error || "本地待办加载失败");
+    state.localTodos = res.data || [];
+    renderTodos();
+    updateBadge();
+  }catch(err){
+    if(entry === state.dateLoadPromise){
+      document.getElementById("todoList").innerHTML = '<div class="empty">加载错误: ' + esc(err.message) + "</div>";
+    }
+  }finally{
+    if(state.dateLoadPromise === entry) state.dateLoadPromise = null;
   }
 }
 
@@ -384,38 +437,97 @@ function renderDocs(){
 
 function renderOKR(){
   var list = document.getElementById("okrList");
-  // Show OKR local todos if available, otherwise show OKR docs
-  if(state.okrTodos && state.okrTodos.length > 0){
-    var html = '<div class="section-label">季度 OKR</div>';
-    state.okrTodos.forEach(function(t){
-      var priDot = {high:"p-high",medium:"p-medium",low:"p-low",none:"p-none"}[t.priority] || "p-none";
-      html += '<div class="todo-item '+(t.completed?"done":"")+'">'
-        + '<div class="todo-checkbox '+(t.completed?"checked":"")+'"></div>'
-        + '<div class="todo-body"><div class="todo-title">'+esc(t.title)+'</div>'
-        + '<div class="todo-meta"><span class="priority-dot '+priDot+'"></span>'
-        + (t.progress ? '<span>'+esc(t.progress)+'</span>' : '')
-        + '<span>'+esc(t.status||"")+'</span></div></div></div>';
-    });
-    list.innerHTML = html;
+  if(!(state.okrTodos||[]).length){
+    list.innerHTML = '<div class="empty">暂无季度 OKR</div>';
     return;
   }
-  if(state.okrDocs && state.okrDocs.length > 0){
-    var html2 = "";
-    state.okrDocs.forEach(function(d){
-      html2 += '<div class="doc-item" data-doc-id="'+d.id+'" data-doc-name="'+esc(d.name)+'">'
-        + '<span class="doc-icon">O</span>'
-        + '<div class="doc-info"><div class="doc-name">'+esc(d.name)+'</div>'
-        + '<div class="doc-path">'+esc(d.path||"")+'</div></div></div>';
-    });
-    list.innerHTML = html2;
-    list.querySelectorAll(".doc-item").forEach(function(el){
-      el.addEventListener("click", function(){
-        openDoc(this.getAttribute("data-doc-id"), this.getAttribute("data-doc-name"));
-      });
-    });
-    return;
-  }
-  list.innerHTML = '<div class="empty">暂无OKR数据</div>';
+  var now = new Date();
+  var quarter = now.getFullYear() + "Q" + (Math.floor(now.getMonth()/3)+1);
+  var html = '<div class="section-label">' + esc(quarter) + ' OKR</div>';
+  state.okrTodos.forEach(function(item){
+    var priClass = {P0:"p-high",P1:"p-medium",P2:"p-low",P3:"p-none"}[item.priority] || "p-none";
+    html += '<div class="todo-item '+(item.completed?"done":"")+'">'
+      + '<div class="todo-checkbox '+(item.completed?"checked":"")+'" onclick="toggleOkr('+item.id+','+item.completed+')"></div>'
+      + '<div class="todo-body" ondblclick="openEditOkr('+item.id+')">'
+      + '<div class="todo-title">'+esc(item.title)+'</div>'
+      + '<div class="todo-meta"><span class="priority-dot '+priClass+'"></span>'
+      + '<span>'+esc(item.priority||"")+'</span>'
+      + (item.ddl ? '<span>DDL '+esc(item.ddl)+'</span>' : '')
+      + ((item.key_results||[]).length ? '<span>KR: '+esc((item.key_results||[]).join('; '))+'</span>' : '')
+      + (item.progress ? '<span>'+esc(item.progress)+'</span>' : '')
+      + '<span>'+(item.completed?"已完成":"未完成")+'</span></div></div>'
+      + '<div class="todo-actions">'
+      + '<button onclick="openEditOkr('+item.id+')" title="编辑">E</button>'
+      + '<button onclick="deleteOkr('+item.id+')" title="删除">X</button>'
+      + '</div></div>';
+  });
+  list.innerHTML = html;
+}
+
+async function loadOkr(){
+  var res = await api("/api/okr");
+  if(res.ok) state.okrTodos = res.data || [];
+  renderOKR();
+}
+
+async function addOkr(){
+  var input = document.getElementById("newOkr");
+  var priority = document.getElementById("newOkrPriority").value;
+  var ddl = document.getElementById("newOkrDdl").value;
+  var keyResultsInput = document.getElementById("newOkrKeyResults");
+  var keyResults = keyResultsInput.value.split(/[;；\n]/).map(function(x){return x.trim();}).filter(Boolean);
+  var title = input.value.trim();
+  if(!title) return;
+  var res = await api("/api/okr/create","POST",{title:title,priority:priority,ddl:ddl,key_results:keyResults});
+  if(res.ok){ input.value=""; keyResultsInput.value=""; toast("已添加 OKR"); loadOkr(); }
+  else toast("添加失败");
+}
+
+async function toggleOkr(id, completed){
+  var res = await api("/api/okr/update","POST",{id:id,completed:!completed});
+  if(res.ok){ toast(completed?"已恢复":"已完成"); loadOkr(); }
+  else toast("操作失败");
+}
+
+async function deleteOkr(id){
+  if(!confirm("确定删除此 OKR?")) return;
+  var res = await api("/api/okr/delete","POST",{id:id});
+  if(res.ok){ toast("已删除"); loadOkr(); }
+  else toast("删除失败");
+}
+
+function openEditOkr(id){
+  var item = state.okrTodos.find(function(x){return x.id == id;});
+  if(!item) return;
+  var title = prompt("OKR 目标:", item.title);
+  if(title === null) return;
+  if(!title.trim()){ toast("目标不能为空"); return; }
+  var priority = prompt("重要等级 P0/P1/P2/P3:", item.priority || "P2");
+  if(priority === null) return;
+  var ddl = prompt("DDL YYYY-MM-DD:", item.ddl || "");
+  if(ddl === null) return;
+  var keyResults = prompt("关键结果（分号分隔）:", (item.key_results||[]).join("; "));
+  if(keyResults === null) return;
+  var progress = prompt("进度说明:", item.progress || "");
+  if(progress === null) return;
+  updateOkr(id, title.trim(), priority, ddl, keyResults, progress);
+}
+
+async function updateOkr(id, title, priority, ddl, keyResults, progress){
+  var res = await api("/api/okr/update","POST",{id:id,title:title,priority:priority,ddl:ddl,key_results:keyResults,progress:progress});
+  if(res.ok){ toast("已更新 OKR"); loadOkr(); }
+  else toast("更新失败");
+}
+
+async function syncOkr(){
+  var btn = document.getElementById("syncOkrBtn");
+  btn.disabled = true; btn.textContent = "同步中...";
+  var res = await api("/api/sync/okr","POST");
+  btn.disabled = false; btn.textContent = "同步到 OKR";
+  if(res.ok){
+    toast("已同步 " + (res.data.synced||0) + "/" + (res.data.total||0) + " 条 OKR");
+    loadOkr();
+  } else toast("同步失败");
 }
 
 async function renderUncompleted(){
@@ -459,7 +571,7 @@ function jumpToDate(dateStr){
   state.selectedDate = dateStr;
   document.getElementById("datePicker").value = dateStr;
   switchTab("todos");
-  refresh();
+  loadSelectedDate();
 }
 
 async function toggleUncompletedTodo(el){
@@ -467,7 +579,7 @@ async function toggleUncompletedTodo(el){
   var dateStr = el.getAttribute("data-date");
   var completed = el.getAttribute("data-completed") === "true";
   var res = await api("/api/local/todos/toggle","POST",{id:todoId,completed:!completed,date:dateStr});
-  if(res.ok){ toast(completed ? "已恢复" : "已完成"); refresh(); renderUncompleted(); }
+  if(res.ok){ toast(completed ? "已恢复" : "已完成"); renderUncompleted(); }
   else toast("操作失败");
 }
 
@@ -557,7 +669,7 @@ async function dmToTodo(type, idx){
   if(title.length > 80) title = title.substring(0, 80) + "...";
   var source = (type === 0) ? ("私聊来自 " + m.author) : ("群聊 " + m.chat_name + " @我 " + m.author);
   var res = await api("/api/local/todos/create","POST",{title:title,priority:"medium",progress:source});
-  if(res.ok){ toast("已从消息创建待办"); refresh(); }
+  if(res.ok){ toast("已从消息创建待办"); loadSelectedDate(); }
   else toast("创建失败");
 }
 
@@ -568,20 +680,20 @@ async function addLocalTodo(){
   var title = input.value.trim();
   if(!title) return;
   var res = await api("/api/local/todos/create","POST",{title:title,priority:priority,date:state.selectedDate});
-  if(res.ok){ input.value=""; toast("已添加本地待办"); refresh(); }
+  if(res.ok){ input.value=""; toast("已添加本地待办"); loadSelectedDate(); }
   else toast("添加失败");
 }
 
 async function toggleLocalTodo(id, completed){
   var res = await api("/api/local/todos/toggle","POST",{id:id,completed:!completed,date:state.selectedDate});
-  if(res.ok){ toast(completed?"已恢复":"已完成"); refresh(); }
+  if(res.ok){ toast(completed?"已恢复":"已完成"); loadSelectedDate(); }
   else toast("操作失败");
 }
 
 async function deleteLocalTodo(id){
   if(!confirm("确定删除此待办?")) return;
   var res = await api("/api/local/todos/delete","POST",{id:id,date:state.selectedDate});
-  if(res.ok){ toast("已删除"); refresh(); }
+  if(res.ok){ toast("已删除"); loadSelectedDate(); }
   else toast("删除失败");
 }
 
@@ -598,7 +710,7 @@ function openEditLocalTodo(id){
 
 async function updateLocalTodoApi(id, title, progress){
   var res = await api("/api/local/todos/update","POST",{id:id,title:title,progress:progress,date:state.selectedDate});
-  if(res.ok){ toast("已更新"); refresh(); }
+  if(res.ok){ toast("已更新"); loadSelectedDate(); }
   else toast("更新失败");
 }
 

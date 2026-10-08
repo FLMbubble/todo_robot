@@ -41,6 +41,10 @@ DAILY_ROOT_FOLDER_ID = 2209182943521                   # "Daily" 文件夹
 WEEKLY_SPACE_ID = 0                                     # 个人空间
 WEEKLY_ROOT_FOLDER_ID = 2209053162058                   # "weekly" 文件夹
 
+# OKR 文档存放在个人空间根目录
+OKR_SPACE_ID = 0
+OKR_ROOT_FOLDER_ID = 2209975974034
+
 # 记录最近同步创建的日报文档 ID (date_str -> resource_id)
 _RECENT_SYNCED_DOCS = {}
 # 记录最近同步创建的周报文档 ID (week_title -> resource_id)
@@ -164,6 +168,97 @@ def save_local_todos(todos, date_str=None):
     }
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
+
+def _okr_file(quarter=None):
+    """返回指定季度 OKR 文件，默认当前季度。"""
+    if not quarter:
+        now = datetime.now(SHANGHAI_TZ)
+        quarter = f"{now.year}Q{(now.month - 1) // 3 + 1}"
+    return os.path.join(DATA_DIR, f"okr-{quarter}.json")
+
+def load_okr_items(quarter=None):
+    path = _okr_file(quarter)
+    if not os.path.exists(path):
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data.get("okrs", [])
+    except Exception:
+        return []
+
+def save_okr_items(okrs, quarter=None):
+    os.makedirs(DATA_DIR, exist_ok=True)
+    path = _okr_file(quarter)
+    data = {
+        "quarter": quarter or _okr_file().split("okr-", 1)[1].removesuffix(".json"),
+        "updated_at": now_ms(),
+        "okrs": okrs,
+    }
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+def _validate_okr_priority(priority):
+    return priority if priority in ("P0", "P1", "P2", "P3") else "P2"
+
+def _normalize_key_results(key_results):
+    if isinstance(key_results, str):
+        raw_lines = key_results.replace(";", "；").replace("；", "\n").splitlines()
+    elif isinstance(key_results, list):
+        raw_lines = "\n".join(str(line) for line in key_results).replace(";", "；").replace("；", "\n").splitlines()
+    else:
+        raw_lines = []
+    lines = [line.strip() for line in raw_lines if line.strip()]
+    return lines[:20]
+
+def add_okr_item(title, priority="P2", ddl=None, progress="", key_results=None):
+    okrs = load_okr_items()
+    item = {
+        "id": _next_local_id(okrs),
+        "title": title,
+        "priority": _validate_okr_priority(priority),
+        "ddl": ddl or "",
+        "key_results": _normalize_key_results(key_results),
+        "progress": progress or "",
+        "completed": False,
+        "status": "未完成",
+        "created_at": now_ms(),
+        "updated_at": now_ms(),
+    }
+    okrs.append(item)
+    save_okr_items(okrs)
+    return item
+
+def update_okr_item(item_id, title=None, priority=None, ddl=None, progress=None, key_results=None, completed=None):
+    okrs = load_okr_items()
+    for item in okrs:
+        if item.get("id") != item_id:
+            continue
+        if title is not None:
+            item["title"] = title
+        if priority is not None:
+            item["priority"] = _validate_okr_priority(priority)
+        if ddl is not None:
+            item["ddl"] = ddl
+        if key_results is not None:
+            item["key_results"] = _normalize_key_results(key_results)
+        if progress is not None:
+            item["progress"] = progress
+        if completed is not None:
+            item["completed"] = completed
+            item["status"] = "已完成" if completed else "未完成"
+        item["updated_at"] = now_ms()
+        save_okr_items(okrs)
+        return item
+    return None
+
+def delete_okr_item(item_id):
+    okrs = load_okr_items()
+    new_okrs = [item for item in okrs if item.get("id") != item_id]
+    if len(new_okrs) == len(okrs):
+        return False
+    save_okr_items(new_okrs)
+    return True
 
 def _next_local_id(todos):
     """生成下一个本地待办 ID"""
@@ -686,11 +781,11 @@ def get_dm_messages(max_chats=15, msg_per_chat=10):
     chats = chat_data.get("data", {}).get("chats", [])
     current_ms = now_ms()
 
-    # 服务号/机器人/助手名称关键词 — 这些发送的消息通常是日程/待办通知，需要过滤
+    # 服务号/机器人/助手消息通常是系统通知，不会产生真实待办
     SERVICE_KEYWORDS = [
         "assistant", "bot", "助手", "calendar", "日历", "todo", "待办", "提醒",
         "中心", "通知", "approval", "审批", "客服", "support", "smartwork",
-        "regression", "orion", "voyager", "pop", "simone", "trail",
+        "regression", "orion", "voyager", "pop", "simone", "trail", "luban",
         "oe", "eec", "dhr", "d-hrssc", "信息安全", "数梦", "桔子堆",
         "圈子", "资产平台", "食域", "代码review", "智能搜索", "文案",
         "mbti", "文本纠错", "爬树", "党、团", "超级助手",
@@ -699,6 +794,8 @@ def get_dm_messages(max_chats=15, msg_per_chat=10):
     ]
 
     def is_service_chat(chat):
+        if chat.get("type") in ("p2ai", "p2bot", "official"):
+            return True
         name = (chat.get("name", "") or "").lower()
         return any(kw in name for kw in SERVICE_KEYWORDS)
 
@@ -1129,6 +1226,47 @@ def sync_todo_to_weekly_report(todo_items=None):
 
 
 # ==================== LLM 草稿处理 ====================
+
+
+def sync_okr_to_quarterly_report():
+    """将当前季度 OKR 同步到 Cooper 季度 OKR 文档。"""
+    now = datetime.now(SHANGHAI_TZ)
+    quarter = f"{now.year}Q{(now.month - 1) // 3 + 1}"
+    okrs = load_okr_items(quarter)
+    title = f"{quarter} OKR"
+
+    lines = [f"# {title}", "", "| 目标 | 关键结果 | 优先级 | DDL | 状态 | 进度 |", "| --- | --- | --- | --- | --- | --- |"]
+    for item in okrs:
+        status = "已完成" if item.get("completed") else "未完成"
+        key_results = "<br>".join(item.get("key_results", []))
+        lines.append(f"| {item.get('title', '')} | {key_results} | {item.get('priority', '')} | {item.get('ddl', '')} | {status} | {item.get('progress', '')} |")
+    content = "\n".join(lines) + "\n"
+
+    okr_docs = find_okr_docs()
+    target_doc = next((doc for doc in okr_docs if doc.get("resourceName", "").strip() == title), None)
+
+    if target_doc:
+        resource_id = target_doc.get("resourceId")
+        if not resource_id:
+            return {"action": "error", "error": "目标文档无 resourceId", "synced": 0, "total": len(okrs)}
+        pull = run_dws(["doc", "update-v2", str(resource_id), "--app", "cooper", "--operation", "pull", "--output", "json"])
+        if pull.get("ok"):
+            blocks = pull.get("data", {}).get("content", []) if isinstance(pull.get("data"), dict) else []
+            for block in reversed(blocks):
+                if block.get("anchor"):
+                    run_dws(["doc", "update-v2", str(resource_id), "--app", "cooper", "--operation", "apply", "--apply-action", "delete_block", "--anchor", block["anchor"], "--output", "json"], timeout=10)
+        run_dws(["doc", "update-v2", str(resource_id), "--app", "cooper", "--operation", "apply", "--apply-action", "insert_blocks", "--position", "start", "--text", content, "--output", "json"], timeout=15)
+        cache_invalidate("recent_docs")
+        return {"action": "updated", "resource_id": resource_id, "title": title, "quarter": quarter, "synced": len(okrs), "total": len(okrs)}
+
+    res = create_doc(title, content, kind="cooper", space_id=OKR_SPACE_ID, parent_id=OKR_ROOT_FOLDER_ID)
+    resource_id = None
+    if res.get("ok"):
+        resource_id = res.get("data", {}).get("resourceId") or res.get("data", {}).get("id")
+    cache_invalidate("recent_docs")
+    if not resource_id:
+        return {"action": "error", "error": "创建 OKR 文档失败", "synced": 0, "total": len(okrs)}
+    return {"action": "created", "resource_id": resource_id, "title": title, "quarter": quarter, "synced": len(okrs), "total": len(okrs)}
 
 import urllib.request
 
@@ -1868,6 +2006,8 @@ class TodoRobotHandler(http.server.BaseHTTPRequestHandler):
             self._handle_list_local_dates()
         elif path == "/api/local/uncompleted":
             self._handle_get_uncompleted()
+        elif path == "/api/okr":
+            self._handle_get_okr_items(params)
         elif path == "/api/summary":
             self._handle_get_summary(params)
         else:
@@ -1890,6 +2030,8 @@ class TodoRobotHandler(http.server.BaseHTTPRequestHandler):
             self._handle_sync_daily()
         elif path == "/api/sync/weekly":
             self._handle_sync_weekly()
+        elif path == "/api/sync/okr":
+            self._handle_sync_okr()
         elif path == "/api/docs/create":
             self._handle_create_doc(body)
         elif path == "/api/docs/todos/toggle":
@@ -1914,6 +2056,12 @@ class TodoRobotHandler(http.server.BaseHTTPRequestHandler):
             self._handle_toggle_local_todo(body)
         elif path == "/api/local/todos/delete":
             self._handle_delete_local_todo(body)
+        elif path == "/api/okr/create":
+            self._handle_create_okr_item(body)
+        elif path == "/api/okr/update":
+            self._handle_update_okr_item(body)
+        elif path == "/api/okr/delete":
+            self._handle_delete_okr_item(body)
         elif path == "/api/local/sync":
             self._handle_sync_local(body)
         elif path == "/api/diag":
@@ -2175,6 +2323,56 @@ class TodoRobotHandler(http.server.BaseHTTPRequestHandler):
         result = get_all_uncompleted_todos()
         self._json({"ok": True, "data": result})
 
+    def _handle_get_okr_items(self, params):
+        quarter = params.get("quarter", [None])[0]
+        now = datetime.now(SHANGHAI_TZ)
+        current_quarter = f"{now.year}Q{(now.month - 1) // 3 + 1}"
+        quarter = quarter or current_quarter
+        self._json({"ok": True, "data": load_okr_items(quarter), "quarter": quarter})
+
+    def _handle_create_okr_item(self, body):
+        title = body.get("title", "").strip()
+        if not title:
+            self._json({"ok": False, "error": "title required"}, 400)
+            return
+        item = add_okr_item(
+            title,
+            priority=body.get("priority", "P2"),
+            ddl=body.get("ddl", ""),
+            key_results=body.get("key_results", []),
+            progress=body.get("progress", ""),
+        )
+        self._json({"ok": True, "data": item})
+
+    def _handle_update_okr_item(self, body):
+        item_id = body.get("id")
+        if item_id is None:
+            self._json({"ok": False, "error": "id required"}, 400)
+            return
+        item = update_okr_item(
+            item_id,
+            title=body.get("title"),
+            priority=body.get("priority"),
+            ddl=body.get("ddl"),
+            key_results=body.get("key_results"),
+            progress=body.get("progress"),
+            completed=body.get("completed"),
+        )
+        if item:
+            self._json({"ok": True, "data": item})
+        else:
+            self._json({"ok": False, "error": "OKR not found"}, 404)
+
+    def _handle_delete_okr_item(self, body):
+        item_id = body.get("id")
+        if item_id is None:
+            self._json({"ok": False, "error": "id required"}, 400)
+            return
+        if delete_okr_item(item_id):
+            self._json({"ok": True, "data": {"deleted": True}})
+        else:
+            self._json({"ok": False, "error": "OKR not found"}, 404)
+
     def _handle_create_local_todo(self, body):
         title = body.get("title", "").strip()
         if not title:
@@ -2341,7 +2539,7 @@ class TodoRobotHandler(http.server.BaseHTTPRequestHandler):
         # 加载周报和OKR本地数据
         today_key = _date_key()
         weekly_todos = load_local_todos(today_key, f"weekly-{today_key}.json")
-        okr_todos = load_local_todos(today_key, f"okr-{today_key}.json")
+        okr_todos = load_okr_items()
 
         return {
             "todos": todo_fmt,
@@ -2453,6 +2651,13 @@ class TodoRobotHandler(http.server.BaseHTTPRequestHandler):
 
     def _handle_sync_weekly(self):
         result = sync_todo_to_weekly_report()
+        self._json({"ok": True, "data": result})
+
+    def _handle_sync_okr(self):
+        result = sync_okr_to_quarterly_report()
+        if result.get("action") == "error":
+            self._json({"ok": False, "error": result.get("error")}, 500)
+            return
         self._json({"ok": True, "data": result})
 
     def _handle_create_doc(self, body):
